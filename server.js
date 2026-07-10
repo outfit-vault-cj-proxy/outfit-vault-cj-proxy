@@ -8,13 +8,13 @@ app.use(express.json({ limit: "10mb" }));
 
 const CJ_ACCESS_TOKEN = process.env.CJ_ACCESS_TOKEN;
 const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-const SHOPIFY_ADMIN_ACCESS_TOKEN =
-  process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
-
-// Shopify releases API versions quarterly.
-// This can be overridden later with a Railway variable.
+const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
+const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 const SHOPIFY_API_VERSION =
   process.env.SHOPIFY_API_VERSION || "2026-07";
+
+let cachedShopifyToken = null;
+let cachedShopifyTokenExpiresAt = 0;
 
 function cleanShopifyDomain(domain = "") {
   return domain
@@ -23,18 +23,89 @@ function cleanShopifyDomain(domain = "") {
     .replace(/\/+$/, "");
 }
 
-function requiredVariablesMissing() {
+function getMissingShopifyVariables() {
   const missing = [];
 
   if (!SHOPIFY_STORE_DOMAIN) {
     missing.push("SHOPIFY_STORE_DOMAIN");
   }
 
-  if (!SHOPIFY_ADMIN_ACCESS_TOKEN) {
-    missing.push("SHOPIFY_ADMIN_ACCESS_TOKEN");
+  if (!SHOPIFY_CLIENT_ID) {
+    missing.push("SHOPIFY_CLIENT_ID");
+  }
+
+  if (!SHOPIFY_CLIENT_SECRET) {
+    missing.push("SHOPIFY_CLIENT_SECRET");
   }
 
   return missing;
+}
+
+async function getShopifyAccessToken() {
+  if (
+    cachedShopifyToken &&
+    Date.now() < cachedShopifyTokenExpiresAt
+  ) {
+    return cachedShopifyToken;
+  }
+
+  const missing = getMissingShopifyVariables();
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing Railway variables: ${missing.join(", ")}`
+    );
+  }
+
+  const storeDomain = cleanShopifyDomain(
+    SHOPIFY_STORE_DOMAIN
+  );
+
+  const tokenResponse = await fetch(
+    `https://${storeDomain}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        client_id: SHOPIFY_CLIENT_ID,
+        client_secret: SHOPIFY_CLIENT_SECRET,
+        grant_type: "client_credentials"
+      })
+    }
+  );
+
+  const rawText = await tokenResponse.text();
+
+  let tokenData;
+
+  try {
+    tokenData = JSON.parse(rawText);
+  } catch {
+    throw new Error(
+      `Shopify token response was not JSON: ${rawText.slice(0, 300)}`
+    );
+  }
+
+  if (!tokenResponse.ok || !tokenData.access_token) {
+    throw new Error(
+      `Shopify token request failed: ${JSON.stringify(tokenData)}`
+    );
+  }
+
+  cachedShopifyToken = tokenData.access_token;
+
+  const expiresIn = Number(
+    tokenData.expires_in || 86400
+  );
+
+  cachedShopifyTokenExpiresAt =
+    Date.now() +
+    Math.max(expiresIn - 300, 60) * 1000;
+
+  return cachedShopifyToken;
 }
 
 app.get("/", (req, res) => {
@@ -49,37 +120,24 @@ app.get("/health", (req, res) => {
     success: true,
     status: "healthy",
     shopifyConfigured:
-      Boolean(SHOPIFY_STORE_DOMAIN) &&
-      Boolean(SHOPIFY_ADMIN_ACCESS_TOKEN),
+      getMissingShopifyVariables().length === 0,
     cjConfigured: Boolean(CJ_ACCESS_TOKEN)
   });
 });
 
-/*
- * Retrieve products already in The Outfit Vault Shopify store.
- *
- * Example:
- * /shopify/products
- * /shopify/products?limit=20
- * /shopify/products?query=jeans
- */
 app.get("/shopify/products", async (req, res) => {
   try {
-    const missing = requiredVariablesMissing();
-
-    if (missing.length > 0) {
-      return res.status(500).json({
-        success: false,
-        error: "Missing Railway environment variables",
-        missing
-      });
-    }
-
     const storeDomain = cleanShopifyDomain(
       SHOPIFY_STORE_DOMAIN
     );
 
-    const requestedLimit = Number(req.query.limit || 50);
+    const accessToken =
+      await getShopifyAccessToken();
+
+    const requestedLimit = Number(
+      req.query.limit || 50
+    );
+
     const limit = Math.min(
       Math.max(requestedLimit, 1),
       100
@@ -126,20 +184,6 @@ app.get("/shopify/products", async (req, res) => {
               }
             }
 
-            media(first: 20) {
-              nodes {
-                ... on MediaImage {
-                  id
-                  image {
-                    url
-                    altText
-                    width
-                    height
-                  }
-                }
-              }
-            }
-
             variants(first: 100) {
               nodes {
                 id
@@ -180,8 +224,7 @@ app.get("/shopify/products", async (req, res) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Shopify-Access-Token":
-            SHOPIFY_ADMIN_ACCESS_TOKEN
+          "X-Shopify-Access-Token": accessToken
         },
         body: JSON.stringify({
           query: graphqlQuery,
@@ -193,7 +236,8 @@ app.get("/shopify/products", async (req, res) => {
       }
     );
 
-    const rawText = await shopifyResponse.text();
+    const rawText =
+      await shopifyResponse.text();
 
     let shopifyData;
 
@@ -210,17 +254,20 @@ app.get("/shopify/products", async (req, res) => {
     }
 
     if (!shopifyResponse.ok) {
-      return res.status(shopifyResponse.status).json({
-        success: false,
-        error: "Shopify API request failed",
-        shopifyResponse: shopifyData
-      });
+      return res
+        .status(shopifyResponse.status)
+        .json({
+          success: false,
+          error: "Shopify API request failed",
+          shopifyResponse: shopifyData
+        });
     }
 
     if (shopifyData.errors) {
       return res.status(400).json({
         success: false,
-        error: "Shopify GraphQL returned errors",
+        error:
+          "Shopify GraphQL returned errors",
         details: shopifyData.errors
       });
     }
@@ -233,10 +280,14 @@ app.get("/shopify/products", async (req, res) => {
       count: products.length,
       products,
       pageInfo:
-        shopifyData?.data?.products?.pageInfo || null
+        shopifyData?.data?.products?.pageInfo ||
+        null
     });
   } catch (error) {
-    console.error("SHOPIFY_PRODUCTS_ERROR", error);
+    console.error(
+      "SHOPIFY_PRODUCTS_ERROR",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -245,12 +296,6 @@ app.get("/shopify/products", async (req, res) => {
   }
 });
 
-/*
- * Search CJ products.
- *
- * Example:
- * /cj/products?keyword=jeans
- */
 app.get("/cj/products", async (req, res) => {
   try {
     if (!CJ_ACCESS_TOKEN) {
@@ -267,22 +312,11 @@ app.get("/cj/products", async (req, res) => {
         ? req.query.keyword.trim()
         : "clothing";
 
-    const requestedSize = Number(req.query.size || 20);
-    const size = Math.min(
-      Math.max(requestedSize, 1),
-      50
-    );
-
-    const page = Math.max(
-      Number(req.query.page || 1),
-      1
-    );
-
     const cjUrl =
       "https://developers.cjdropshipping.com" +
       "/api2.0/v1/product/listV2" +
-      `?page=${page}` +
-      `&size=${size}` +
+      "?page=1" +
+      "&size=20" +
       `&keyword=${encodeURIComponent(keyword)}`;
 
     const cjResponse = await fetch(cjUrl, {
@@ -303,15 +337,14 @@ app.get("/cj/products", async (req, res) => {
         success: false,
         error:
           "CJ returned a response that was not JSON",
-        httpStatus: cjResponse.status,
         responsePreview: rawText.slice(0, 500)
       });
     }
 
-    return res.status(cjResponse.status).json(cjData);
+    return res
+      .status(cjResponse.status)
+      .json(cjData);
   } catch (error) {
-    console.error("CJ_PRODUCTS_ERROR", error);
-
     return res.status(500).json({
       success: false,
       error: error.message
@@ -323,18 +356,12 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: "Route not found",
-    method: req.method,
-    path: req.path,
-    availableRoutes: [
-      "GET /",
-      "GET /health",
-      "GET /shopify/products",
-      "GET /cj/products?keyword=jeans"
-    ]
+    path: req.path
   });
 });
 
-const PORT = Number(process.env.PORT) || 8080;
+const PORT =
+  Number(process.env.PORT) || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
