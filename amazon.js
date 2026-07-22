@@ -295,3 +295,32 @@ export async function exchangeAuthCode(code, redirectUri) {
   if (!res.ok || !data.refresh_token) throw new Error("Token exchange failed: " + JSON.stringify(data));
   return data.refresh_token;
 }
+export async function getOrderItems(orderId) {
+  if (!orderId) {
+    return {
+      success: false,
+      error: "Amazon order ID is required",
+    };
+  }
+
+  const path = `/orders/v0/orders/${encodeURIComponent(orderId)}/orderItems`;
+  const result = await spApiCall("GET", path);
+
+  if (result.ok) {
+    return {
+      success: true,
+      orderId,
+      orderItems: result.data?.payload?.OrderItems || [],
+    };
+  }
+
+  return {
+    success: false,
+    orderId,
+    status: result.status,
+    error:
+      typeof result.data === "string"
+        ? result.data
+        : JSON.stringify(result.data),
+  };
+}
