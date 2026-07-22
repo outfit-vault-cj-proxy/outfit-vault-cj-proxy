@@ -324,3 +324,6 @@ export async function getOrderItems(orderId) {
         : JSON.stringify(result.data),
   };
 }
+export async function testConnection() {
+  return checkConnection();
+}
