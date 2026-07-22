@@ -337,7 +337,6 @@ app.get("/shopify/products/variants", async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-Part 2 of 2
 
 // Import CJ products into Shopify as ACTIVE, published to the Online Store
 app.post("/shopify/import", async (req, res) => {
