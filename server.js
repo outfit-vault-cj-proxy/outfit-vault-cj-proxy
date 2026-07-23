@@ -1,4 +1,3 @@
-
 /* eslint-env node */
 /* global process */
 
@@ -6,7 +5,11 @@ import express from "express";
 import cors from "cors";
 
 import createAmazonEngineRouter from "./amazonEngineRoutes.js";
-import getShopifyVariants from "./shopifyVariants.js";
+import * as shopifyVariantsModule from "./shopifyVariants.js";
+
+const getShopifyVariants =
+  shopifyVariantsModule.getShopifyVariants ||
+  shopifyVariantsModule.default;
 
 import {
   checkConnection,
