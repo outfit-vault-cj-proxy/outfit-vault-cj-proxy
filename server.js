@@ -1,6 +1,3 @@
-/* eslint-env node */
-/* global process */
-
 import express from "express";
 import cors from "cors";
 
@@ -28,6 +25,20 @@ import {
   previewOfferListing,
   createOfferListing
 } from "./amazon.js";
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: false }));
+
+app.use(
+  "/amazon-engine",
+  createAmazonEngineRouter({
+    getShopifyVariants
+  })
+);
 
 
 const app = express();
