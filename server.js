@@ -225,7 +225,6 @@ async function shopifyGraphQL(
 
   return data.data;
 }
-}
 
 let onlineStorePublicationId = null;
 async function getOnlineStorePublicationId() {
