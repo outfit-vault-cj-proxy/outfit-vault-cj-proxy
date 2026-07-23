@@ -4,6 +4,9 @@
 import express from "express";
 import cors from "cors";
 
+import createAmazonEngineRouter from "./amazonEngineRoutes.js";
+import { getShopifyVariants } from "./shopifyVariants.js";
+
 import {
   checkConnection,
   testConnection,
