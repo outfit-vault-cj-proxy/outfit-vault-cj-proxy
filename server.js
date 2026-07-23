@@ -16,7 +16,10 @@ import {
   getOrders,
   getOrderItems,
   updateAmazonTracking,
-  searchCatalogByIdentifier
+  searchCatalogByIdentifier,
+  getListingRestrictions,
+  previewOfferListing,
+  createOfferListing
 } from "./amazon.js";
 
 const app = express();
@@ -29,20 +32,24 @@ app.use(express.json({ limit: "10mb" }));
    CONFIGURATION
 ========================================================= */
 
-const CJ_API_KEY = process.env.CJ_API_KEY;
+const CJ_API_KEY =
+  process.env.CJ_API_KEY;
 
 const CJ_BASE =
   "https://developers.cjdropshipping.com/api2.0/v1";
 
 const SHOPIFY_API_VERSION =
-  process.env.SHOPIFY_API_VERSION || "2026-07";
+  process.env.SHOPIFY_API_VERSION ||
+  "2026-07";
 
-const SHOPIFY_STORE_DOMAIN = String(
-  process.env.SHOPIFY_STORE_DOMAIN || ""
-)
-  .trim()
-  .replace(/^https?:\/\//i, "")
-  .replace(/\/+$/, "");
+const SHOPIFY_STORE_DOMAIN =
+  String(
+    process.env.SHOPIFY_STORE_DOMAIN ||
+    ""
+  )
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/+$/, "");
 
 const SHOPIFY_CLIENT_ID =
   process.env.SHOPIFY_CLIENT_ID;
@@ -82,12 +89,30 @@ async function readJsonResponse(
   }
 
   try {
-    return JSON.parse(responseText);
+    return JSON.parse(
+      responseText
+    );
   } catch {
     throw new Error(
       `${serviceName} returned invalid JSON (${response.status}): ${responseText}`
     );
   }
+}
+
+function responseStatus(data) {
+  if (data?.success) {
+    return 200;
+  }
+
+  if (
+    Number.isInteger(
+      data?.status
+    )
+  ) {
+    return data.status;
+  }
+
+  return 502;
 }
 
 /* =========================================================
@@ -100,7 +125,8 @@ let cjTokenExpiresAt = 0;
 async function getCJToken() {
   if (
     cachedCJToken &&
-    Date.now() < cjTokenExpiresAt
+    Date.now() <
+      cjTokenExpiresAt
   ) {
     return cachedCJToken;
   }
@@ -116,8 +142,10 @@ async function getCJToken() {
     {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json"
+        "Content-Type":
+          "application/json",
+        Accept:
+          "application/json"
       },
       body: JSON.stringify({
         apiKey: CJ_API_KEY
@@ -147,7 +175,11 @@ async function getCJToken() {
 
   cjTokenExpiresAt =
     Date.now() +
-    14 * 24 * 60 * 60 * 1000;
+    14 *
+      24 *
+      60 *
+      60 *
+      1000;
 
   return cachedCJToken;
 }
@@ -162,15 +194,16 @@ async function cjRequest(
     overrideToken ||
     (await getCJToken());
 
-  const headers = {
-    "CJ-Access-Token": token,
-    Accept: "application/json",
-    "Content-Type": "application/json"
-  };
-
   const options = {
     method,
-    headers
+    headers: {
+      "CJ-Access-Token":
+        token,
+      Accept:
+        "application/json",
+      "Content-Type":
+        "application/json"
+    }
   };
 
   if (body !== null) {
@@ -271,7 +304,8 @@ async function getShopifyAccessToken(
     !forceRefresh &&
     cachedShopifyToken &&
     Date.now() <
-      shopifyTokenExpiresAt - 60_000
+      shopifyTokenExpiresAt -
+        60_000
   ) {
     return cachedShopifyToken;
   }
@@ -283,16 +317,18 @@ async function getShopifyAccessToken(
       headers: {
         "Content-Type":
           "application/x-www-form-urlencoded",
-        Accept: "application/json"
+        Accept:
+          "application/json"
       },
-      body: new URLSearchParams({
-        grant_type:
-          "client_credentials",
-        client_id:
-          SHOPIFY_CLIENT_ID,
-        client_secret:
-          SHOPIFY_CLIENT_SECRET
-      }).toString()
+      body:
+        new URLSearchParams({
+          grant_type:
+            "client_credentials",
+          client_id:
+            SHOPIFY_CLIENT_ID,
+          client_secret:
+            SHOPIFY_CLIENT_SECRET
+        }).toString()
     }
   );
 
@@ -344,7 +380,8 @@ async function shopifyGraphQL(
           accessToken,
         "Content-Type":
           "application/json",
-        Accept: "application/json"
+        Accept:
+          "application/json"
       },
       body: JSON.stringify({
         query,
@@ -406,7 +443,9 @@ async function shopifyGraphQL(
 let onlineStorePublicationId = null;
 
 async function getOnlineStorePublicationId() {
-  if (onlineStorePublicationId) {
+  if (
+    onlineStorePublicationId
+  ) {
     return onlineStorePublicationId;
   }
 
@@ -424,15 +463,18 @@ async function getOnlineStorePublicationId() {
   `;
 
   const data =
-    await shopifyGraphQL(query);
+    await shopifyGraphQL(
+      query
+    );
 
   const publication =
     (
-      data?.publications?.edges ||
-      []
+      data?.publications
+        ?.edges || []
     )
       .map(
-        (edge) => edge.node
+        (edge) =>
+          edge.node
       )
       .find(
         (node) =>
@@ -508,71 +550,83 @@ async function publishProduct(
    BASIC ROUTES
 ========================================================= */
 
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message:
-      "The Outfit Vault proxy is running",
-    version:
-      "amazon-catalog-route-v2"
-  });
-});
-
-app.get("/health", async (req, res) => {
-  const shopifyConfigured =
-    Boolean(
-      SHOPIFY_STORE_DOMAIN &&
-      SHOPIFY_CLIENT_ID &&
-      SHOPIFY_CLIENT_SECRET
-    );
-
-  const amazonConfigured =
-    Boolean(
-      process.env
-        .AMAZON_LWA_CLIENT_ID &&
-      process.env
-        .AMAZON_LWA_CLIENT_SECRET &&
-      process.env
-        .AMAZON_LWA_REFRESH_TOKEN &&
-      process.env
-        .AMAZON_SELLER_ID
-    );
-
-  let shopifyAuthenticated =
-    false;
-
-  let shopifyError = null;
-
-  if (shopifyConfigured) {
-    try {
-      await getShopifyAccessToken();
-
-      shopifyAuthenticated =
-        true;
-    } catch (error) {
-      shopifyError =
-        error.message;
-    }
+app.get(
+  "/",
+  (req, res) => {
+    res.json({
+      success: true,
+      message:
+        "The Outfit Vault proxy is running",
+      version:
+        "amazon-offer-engine-v3"
+    });
   }
+);
 
-  res.json({
-    success: true,
-    version:
-      "amazon-catalog-route-v2",
-    shopifyConfigured,
-    shopifyAuthenticated,
-    shopifyError,
-    cjConfigured:
-      Boolean(CJ_API_KEY),
-    amazonConfigured,
-    amazonEnvironment:
-      process.env
-        .AMAZON_SPAPI_ENVIRONMENT ||
-      "production",
-    amazonCatalogRoute:
-      "/amazon/catalog/search"
-  });
-});
+app.get(
+  "/health",
+  async (req, res) => {
+    const shopifyConfigured =
+      Boolean(
+        SHOPIFY_STORE_DOMAIN &&
+          SHOPIFY_CLIENT_ID &&
+          SHOPIFY_CLIENT_SECRET
+      );
+
+    const amazonConfigured =
+      Boolean(
+        process.env
+          .AMAZON_LWA_CLIENT_ID &&
+          process.env
+            .AMAZON_LWA_CLIENT_SECRET &&
+          process.env
+            .AMAZON_LWA_REFRESH_TOKEN &&
+          process.env
+            .AMAZON_SELLER_ID
+      );
+
+    let shopifyAuthenticated =
+      false;
+
+    let shopifyError = null;
+
+    if (shopifyConfigured) {
+      try {
+        await getShopifyAccessToken();
+
+        shopifyAuthenticated =
+          true;
+      } catch (error) {
+        shopifyError =
+          error.message;
+      }
+    }
+
+    res.json({
+      success: true,
+      version:
+        "amazon-offer-engine-v3",
+      shopifyConfigured,
+      shopifyAuthenticated,
+      shopifyError,
+      cjConfigured:
+        Boolean(
+          CJ_API_KEY
+        ),
+      amazonConfigured,
+      amazonEnvironment:
+        process.env
+          .AMAZON_SPAPI_ENVIRONMENT ||
+        "production",
+      amazonCatalogRoute:
+        "/amazon/catalog/search",
+      amazonPreviewRoute:
+        "/amazon/offer/preview",
+      amazonCreateRoute:
+        "/amazon/offer/create"
+    });
+  }
+);
 
 app.get(
   "/debug/routes",
@@ -581,7 +635,8 @@ app.get(
 
     for (
       const layer of
-      app._router?.stack || []
+      app._router?.stack ||
+      []
     ) {
       if (!layer.route) {
         continue;
@@ -589,8 +644,8 @@ app.get(
 
       const methods =
         Object.keys(
-          layer.route.methods ||
-          {}
+          layer.route
+            .methods || {}
         )
           .filter(
             (method) =>
@@ -611,6 +666,8 @@ app.get(
 
     res.json({
       success: true,
+      version:
+        "amazon-offer-engine-v3",
       routeCount:
         routes.length,
       routes
@@ -637,18 +694,19 @@ app.get(
       const size =
         req.query.size || 20;
 
-      const data = await cjGet(
-        `/product/listV2?page=${encodeURIComponent(
-          page
-        )}&size=${encodeURIComponent(
-          size
-        )}&keyWord=${encodeURIComponent(
-          keyword
-        )}`,
-        req.headers[
-          "x-cj-access-token"
-        ]
-      );
+      const data =
+        await cjGet(
+          `/product/listV2?page=${encodeURIComponent(
+            page
+          )}&size=${encodeURIComponent(
+            size
+          )}&keyWord=${encodeURIComponent(
+            keyword
+          )}`,
+          req.headers[
+            "x-cj-access-token"
+          ]
+        );
 
       res.json(data);
     } catch (error) {
@@ -676,14 +734,15 @@ app.get(
         );
       }
 
-      const data = await cjGet(
-        `/product/query?pid=${encodeURIComponent(
-          pid
-        )}`,
-        req.headers[
-          "x-cj-access-token"
-        ]
-      );
+      const data =
+        await cjGet(
+          `/product/query?pid=${encodeURIComponent(
+            pid
+          )}`,
+          req.headers[
+            "x-cj-access-token"
+          ]
+        );
 
       res.json(data);
     } catch (error) {
@@ -700,13 +759,14 @@ app.post(
   "/cj/create-order",
   async (req, res) => {
     try {
-      const data = await cjPost(
-        "/shopping/order/createOrderV2",
-        req.body,
-        req.headers[
-          "x-cj-access-token"
-        ]
-      );
+      const data =
+        await cjPost(
+          "/shopping/order/createOrderV2",
+          req.body,
+          req.headers[
+            "x-cj-access-token"
+          ]
+        );
 
       res.json(data);
     } catch (error) {
@@ -786,7 +846,8 @@ app.get(
             query,
             {
               first: 250,
-              after: cursor
+              after:
+                cursor
             }
           );
 
@@ -849,8 +910,8 @@ app.get(
 
         for (
           const edge of
-          product.variants?.edges ||
-          []
+          product.variants
+            ?.edges || []
         ) {
           const variant =
             edge.node;
@@ -912,7 +973,9 @@ app.get(
         }
       }
 
-      if (requestedProductId) {
+      if (
+        requestedProductId
+      ) {
         const query = `
           query Product(
             $id: ID!
@@ -971,9 +1034,12 @@ app.get(
         }
       } else {
         let cursor = null;
-        let hasNextPage = true;
+        let hasNextPage =
+          true;
 
-        while (hasNextPage) {
+        while (
+          hasNextPage
+        ) {
           const query = `
             query Products(
               $first: Int!,
@@ -1034,7 +1100,8 @@ app.get(
               query,
               {
                 first: 250,
-                after: cursor
+                after:
+                  cursor
               }
             );
 
@@ -1060,7 +1127,7 @@ app.get(
         }
       }
 
-      const seenVariantIds =
+      const seenIds =
         new Set();
 
       const duplicates = [];
@@ -1070,7 +1137,7 @@ app.get(
         variants
       ) {
         if (
-          seenVariantIds.has(
+          seenIds.has(
             variant.shopify_variant_id
           )
         ) {
@@ -1079,7 +1146,7 @@ app.get(
           );
         }
 
-        seenVariantIds.add(
+        seenIds.add(
           variant.shopify_variant_id
         );
       }
@@ -1200,7 +1267,8 @@ app.post(
             );
 
           const product =
-            detail?.data || {};
+            detail?.data ||
+            {};
 
           const images = [
             product.productImage,
@@ -1235,17 +1303,14 @@ app.post(
           const variables = {
             product: {
               title:
-                product
-                  .productNameEn ||
-                product
-                  .productName ||
+                product.productNameEn ||
+                product.productName ||
                 selected.name ||
                 "Imported CJ Product",
 
               descriptionHtml:
                 product.description ||
-                product
-                  .productDescription ||
+                product.productDescription ||
                 selected.description ||
                 "",
 
@@ -1254,8 +1319,7 @@ app.post(
 
               productType:
                 product.categoryName ||
-                product
-                  .threeCategoryName ||
+                product.threeCategoryName ||
                 "Dropshipping",
 
               tags: [
@@ -1268,22 +1332,21 @@ app.post(
                 "ACTIVE"
             },
 
-            media: images
-              .slice(0, 10)
-              .map(
-                (image) => ({
-                  mediaContentType:
-                    "IMAGE",
-                  originalSource:
-                    image,
-                  alt:
-                    product
-                      .productNameEn ||
-                    product
-                      .productName ||
-                    "Product image"
-                })
-              )
+            media:
+              images
+                .slice(0, 10)
+                .map(
+                  (image) => ({
+                    mediaContentType:
+                      "IMAGE",
+                    originalSource:
+                      image,
+                    alt:
+                      product.productNameEn ||
+                      product.productName ||
+                      "Product image"
+                  })
+                )
           };
 
           const result =
@@ -1294,9 +1357,12 @@ app.post(
 
           const errors =
             result.productCreate
-              ?.userErrors || [];
+              ?.userErrors ||
+            [];
 
-          if (errors.length > 0) {
+          if (
+            errors.length > 0
+          ) {
             imported.push({
               cjProductId,
               success: false,
@@ -1310,8 +1376,11 @@ app.post(
             result.productCreate
               .product;
 
-          let published = false;
-          let publishError = null;
+          let published =
+            false;
+
+          let publishError =
+            null;
 
           try {
             await publishProduct(
@@ -1369,9 +1438,9 @@ app.get(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1393,9 +1462,9 @@ app.get(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1429,7 +1498,9 @@ app.get(
         req.query.type;
 
       if (!identifierType) {
-        if (req.query.asin) {
+        if (
+          req.query.asin
+        ) {
           identifierType =
             "ASIN";
         } else if (
@@ -1475,9 +1546,235 @@ app.get(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
+        )
+        .json(data);
+    } catch (error) {
+      jsonError(
+        res,
+        500,
+        error
+      );
+    }
+  }
+);
+
+/* =========================================================
+   AMAZON OFFER-ONLY ENGINE
+========================================================= */
+
+app.get(
+  "/amazon/offer/restrictions",
+  async (req, res) => {
+    try {
+      const asin =
+        req.query.asin;
+
+      const conditionType =
+        req.query.conditionType ||
+        req.query.condition ||
+        "new_new";
+
+      if (!asin) {
+        return jsonError(
+          res,
+          400,
+          "asin required",
+          {
+            example:
+              "/amazon/offer/restrictions?asin=B077SH7LZH"
+          }
+        );
+      }
+
+      const data =
+        await getListingRestrictions(
+          asin,
+          conditionType
+        );
+
+      res
+        .status(
+          responseStatus(
+            data
+          )
+        )
+        .json(data);
+    } catch (error) {
+      jsonError(
+        res,
+        500,
+        error
+      );
+    }
+  }
+);
+
+app.get(
+  "/amazon/offer/preview",
+  async (req, res) => {
+    try {
+      const product = {
+        asin:
+          req.query.asin ||
+          "B077SH7LZH",
+
+        sku:
+          req.query.sku ||
+          "AI7AR",
+
+        price:
+          req.query.price ||
+          "86.95",
+
+        quantity:
+          req.query.quantity ||
+          "1",
+
+        condition_type:
+          req.query.condition ||
+          "new_new"
+      };
+
+      const data =
+        await previewOfferListing(
+          product
+        );
+
+      res
+        .status(
+          responseStatus(
+            data
+          )
+        )
+        .json({
+          ...data,
+          testProduct: {
+            asin:
+              product.asin,
+            sku:
+              product.sku,
+            price:
+              Number(
+                product.price
+              ),
+            quantity:
+              Number(
+                product.quantity
+              ),
+            condition:
+              product.condition_type
+          }
+        });
+    } catch (error) {
+      jsonError(
+        res,
+        500,
+        error
+      );
+    }
+  }
+);
+
+app.post(
+  "/amazon/offer/preview",
+  async (req, res) => {
+    try {
+      const product =
+        req.body?.product ||
+        req.body;
+
+      if (
+        !product ||
+        !product.asin
+      ) {
+        return jsonError(
+          res,
+          400,
+          "Product with asin is required"
+        );
+      }
+
+      const data =
+        await previewOfferListing(
+          product
+        );
+
+      res
+        .status(
+          responseStatus(
+            data
+          )
+        )
+        .json(data);
+    } catch (error) {
+      jsonError(
+        res,
+        500,
+        error
+      );
+    }
+  }
+);
+
+app.post(
+  "/amazon/offer/create",
+  async (req, res) => {
+    try {
+      const product =
+        req.body?.product ||
+        req.body;
+
+      if (
+        !product ||
+        !product.asin
+      ) {
+        return jsonError(
+          res,
+          400,
+          "Product with asin is required"
+        );
+      }
+
+      if (
+        !product.sku &&
+        !product.amazon_sku &&
+        !product.shopify_variant_id
+      ) {
+        return jsonError(
+          res,
+          400,
+          "Product SKU or Shopify variant ID is required"
+        );
+      }
+
+      if (
+        product.price ===
+          undefined ||
+        product.price ===
+          null ||
+        product.price ===
+          ""
+      ) {
+        return jsonError(
+          res,
+          400,
+          "Product price is required"
+        );
+      }
+
+      const data =
+        await createOfferListing(
+          product
+        );
+
+      res
+        .status(
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1601,7 +1898,9 @@ async function handleAmazonOAuthCallback(
         redirectUri
       );
 
-    if (!result.refresh_token) {
+    if (
+      !result.refresh_token
+    ) {
       return jsonError(
         res,
         500,
@@ -1723,7 +2022,7 @@ app.get(
 );
 
 /* =========================================================
-   AMAZON LISTINGS
+   AMAZON STANDARD LISTINGS
 ========================================================= */
 
 app.post(
@@ -1748,9 +2047,9 @@ app.post(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1774,9 +2073,9 @@ app.get(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1815,9 +2114,9 @@ async function handleInventory(
 
     res
       .status(
-        data.success
-          ? 200
-          : data.status || 502
+        responseStatus(
+          data
+        )
       )
       .json(data);
   } catch (error) {
@@ -1877,9 +2176,9 @@ async function handlePrice(
 
     res
       .status(
-        data.success
-          ? 200
-          : data.status || 502
+        responseStatus(
+          data
+        )
       )
       .json(data);
   } catch (error) {
@@ -1916,9 +2215,9 @@ app.get(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1942,9 +2241,9 @@ app.get(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -1987,9 +2286,9 @@ app.post(
 
       res
         .status(
-          data.success
-            ? 200
-            : data.status || 502
+          responseStatus(
+            data
+          )
         )
         .json(data);
     } catch (error) {
@@ -2003,26 +2302,30 @@ app.post(
 );
 
 /* =========================================================
-   JSON 404 HANDLER
+   JSON 404
 ========================================================= */
 
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error:
-      "Route not found",
-    method:
-      req.method,
-    path:
-      req.path,
-    version:
-      "amazon-catalog-route-v2",
-    catalogSearchExample:
-      "/amazon/catalog/search?upc=889359349981",
-    routeCheck:
-      "/debug/routes"
-  });
-});
+app.use(
+  (req, res) => {
+    res.status(404).json({
+      success: false,
+      error:
+        "Route not found",
+      method:
+        req.method,
+      path:
+        req.path,
+      version:
+        "amazon-offer-engine-v3",
+      routeCheck:
+        "/debug/routes",
+      catalogSearch:
+        "/amazon/catalog/search?upc=889359349981",
+      offerPreview:
+        "/amazon/offer/preview?asin=B077SH7LZH&sku=AI7AR&price=86.95&quantity=1"
+    });
+  }
+);
 
 /* =========================================================
    SERVER STARTUP
@@ -2037,11 +2340,19 @@ app.listen(
     );
 
     console.log(
-      "Server version: amazon-catalog-route-v2"
+      "Server version: amazon-offer-engine-v3"
     );
 
     console.log(
       "Amazon catalog route active: GET /amazon/catalog/search"
+    );
+
+    console.log(
+      "Amazon offer preview active: GET/POST /amazon/offer/preview"
+    );
+
+    console.log(
+      "Amazon offer creation active: POST /amazon/offer/create"
     );
   }
 );
