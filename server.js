@@ -9,65 +9,222 @@ app.use(cors());
 app.use(express.json());
 
 const CJ_API_KEY = process.env.CJ_API_KEY;
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+
+const SHOPIFY_STORE_DOMAIN = String(
+  process.env.SHOPIFY_STORE_DOMAIN || ""
+)
+  .trim()
+  .replace(/^https?:\/\//i, "")
+  .replace(/\/+$/, "");
+
+const SHOPIFY_CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
+const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
+
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 const SHOPIFY_API_VERSION = "2026-07";
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
+let cachedShopifyToken = null;
+let shopifyTokenExpiresAt = 0;
+
 async function getCJToken() {
-  if (cachedToken && Date.now() < tokenExpiresAt) return cachedToken;
-  if (!CJ_API_KEY) throw new Error("Missing CJ_API_KEY");
-  const res = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey: CJ_API_KEY })
-  });
+  if (cachedToken && Date.now() < tokenExpiresAt) {
+    return cachedToken;
+  }
+
+  if (!CJ_API_KEY) {
+    throw new Error("Missing CJ_API_KEY");
+  }
+
+  const res = await fetch(
+    `${CJ_BASE}/authentication/getAccessToken`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        apiKey: CJ_API_KEY
+      })
+    }
+  );
+
   const data = await res.json();
-  if (!res.ok || !data.data?.accessToken) throw new Error(JSON.stringify(data));
+
+  if (!res.ok || !data.data?.accessToken) {
+    throw new Error(JSON.stringify(data));
+  }
+
   cachedToken = data.data.accessToken;
-  tokenExpiresAt = Date.now() + 14 * 24 * 60 * 60 * 1000;
+  tokenExpiresAt =
+    Date.now() + 14 * 24 * 60 * 60 * 1000;
+
   return cachedToken;
 }
 
 async function cjGet(path, overrideToken) {
-  const token = overrideToken || await getCJToken();
+  const token =
+    overrideToken || (await getCJToken());
+
   const r = await fetch(`${CJ_BASE}${path}`, {
-    headers: { "CJ-Access-Token": token, "Content-Type": "application/json" }
+    headers: {
+      "CJ-Access-Token": token,
+      "Content-Type": "application/json"
+    }
   });
+
   return r.json();
 }
 
 async function cjPost(path, body, overrideToken) {
-  const token = overrideToken || await getCJToken();
+  const token =
+    overrideToken || (await getCJToken());
+
   const r = await fetch(`${CJ_BASE}${path}`, {
     method: "POST",
-    headers: { "CJ-Access-Token": token, "Content-Type": "application/json" },
+    headers: {
+      "CJ-Access-Token": token,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body)
   });
+
   return r.json();
 }
 
-async function shopifyGraphQL(query, variables) {
-  if (!SHOPIFY_STORE_DOMAIN || !SHOPIFY_ADMIN_ACCESS_TOKEN) {
-    throw new Error("Missing SHOPIFY_STORE_DOMAIN or SHOPIFY_ADMIN_ACCESS_TOKEN");
+async function getShopifyAccessToken(forceRefresh = false) {
+  if (
+    !SHOPIFY_STORE_DOMAIN ||
+    !SHOPIFY_CLIENT_ID ||
+    !SHOPIFY_CLIENT_SECRET
+  ) {
+    throw new Error(
+      "Missing SHOPIFY_STORE_DOMAIN, SHOPIFY_CLIENT_ID, or SHOPIFY_CLIENT_SECRET"
+    );
   }
+
+  if (
+    !forceRefresh &&
+    cachedShopifyToken &&
+    Date.now() < shopifyTokenExpiresAt - 60000
+  ) {
+    return cachedShopifyToken;
+  }
+
+  const res = await fetch(
+    `https://${SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json"
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: SHOPIFY_CLIENT_ID,
+        client_secret: SHOPIFY_CLIENT_SECRET
+      }).toString()
+    }
+  );
+
+  const responseText = await res.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Shopify authentication returned invalid JSON: ${responseText}`
+    );
+  }
+
+  if (!res.ok || !data.access_token) {
+    throw new Error(
+      `Shopify authentication failed (${res.status}): ${JSON.stringify(data)}`
+    );
+  }
+
+  cachedShopifyToken = data.access_token;
+
+  const expiresInSeconds =
+    Number(data.expires_in) || 86399;
+
+  shopifyTokenExpiresAt =
+    Date.now() + expiresInSeconds * 1000;
+
+  return cachedShopifyToken;
+}
+
+async function shopifyGraphQL(
+  query,
+  variables = {},
+  allowRetry = true
+) {
+  const accessToken =
+    await getShopifyAccessToken();
+
   const res = await fetch(
     `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
     {
       method: "POST",
       headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_ACCESS_TOKEN,
-        "Content-Type": "application/json"
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+        Accept: "application/json"
       },
-      body: JSON.stringify({ query, variables })
+      body: JSON.stringify({
+        query,
+        variables
+      })
     }
   );
-  const data = await res.json();
-  if (data.errors) throw new Error("Shopify error: " + JSON.stringify(data.errors));
+
+  if (
+    (res.status === 401 || res.status === 403) &&
+    allowRetry
+  ) {
+    cachedShopifyToken = null;
+    shopifyTokenExpiresAt = 0;
+
+    await getShopifyAccessToken(true);
+
+    return shopifyGraphQL(
+      query,
+      variables,
+      false
+    );
+  }
+
+  const responseText = await res.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Shopify returned invalid JSON (${res.status}): ${responseText}`
+    );
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      `Shopify API request failed (${res.status}): ${JSON.stringify(data)}`
+    );
+  }
+
+  if (data.errors) {
+    throw new Error(
+      "Shopify error: " +
+        JSON.stringify(data.errors)
+    );
+  }
+
   return data.data;
+}
 }
 
 let onlineStorePublicationId = null;
