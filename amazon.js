@@ -1,329 +1,1196 @@
-import crypto from "crypto";
-const SPAPI_HOST = "sellingpartnerapi-na.amazon.com";
-const SPAPI_REGION = "us-east-1";
-const LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token";
-const STS_URL = "https://sts.amazonaws.com/";
-const DEFAULT_MARKETPLACE = "ATVPDKIKX0DER";
+/* eslint-env node */
+/* global process */
+
+const SPAPI_HOST =
+  process.env.AMAZON_SPAPI_HOST ||
+  "sellingpartnerapi-na.amazon.com";
+
+const LWA_TOKEN_URL =
+  "https://api.amazon.com/auth/o2/token";
+
+const DEFAULT_MARKETPLACE =
+  "ATVPDKIKX0DER";
+
+const USER_AGENT =
+  "TheOutfitVault/1.0 (Language=JavaScript; Platform=Node.js)";
 
 let cachedLWAToken = null;
 let lwaExpiresAt = 0;
-let cachedRoleCreds = null;
-let roleCredsExpiresAt = 0;
 
-function hmac(key, data) {
-  return crypto.createHmac("sha256", key).update(data).digest();
-}
-
-function sha256Hex(data) {
-  return crypto.createHash("sha256").update(data).digest("hex");
-}
-
-function uriEncode(str, encodeSlash = true) {
-  let result = encodeURIComponent(String(str));
-  result = result.replace(/!/g, "%27").replace(/\*/g, "%2A").replace(/\(/g, "%28").replace(/\)/g, "%29");
-  if (!encodeSlash) result = result.replace(/%2F/g, "/");
-  return result;
-}
+/* =========================================================
+   CONFIGURATION
+========================================================= */
 
 function getMarketplace() {
-  return process.env.AMAZON_MARKETPLACE_ID || DEFAULT_MARKETPLACE;
+  return (
+    process.env.AMAZON_MARKETPLACE_ID ||
+    DEFAULT_MARKETPLACE
+  );
 }
 
 function getSellerId() {
   return process.env.AMAZON_SELLER_ID;
 }
 
-function checkCreds() {
-  const missing = [
+function checkLwaCredentials() {
+  const required = [
+    "AMAZON_LWA_CLIENT_ID",
+    "AMAZON_LWA_CLIENT_SECRET"
+  ];
+
+  const missing = required.filter(
+    (key) => !process.env[key]
+  );
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing Amazon env vars: ${missing.join(", ")}`
+    );
+  }
+}
+
+function checkRuntimeCredentials() {
+  const required = [
     "AMAZON_LWA_CLIENT_ID",
     "AMAZON_LWA_CLIENT_SECRET",
     "AMAZON_LWA_REFRESH_TOKEN",
-    "AMAZON_SPAPI_ACCESS_KEY",
-    "AMAZON_SPAPI_SECRET_KEY",
-    "AMAZON_SPAPI_ROLE_ARN",
-    "AMAZON_SELLER_ID",
-  ].filter((k) => !process.env[k]);
-  if (missing.length) throw new Error("Missing Amazon env vars: " + missing.join(", "));
+    "AMAZON_SELLER_ID"
+  ];
+
+  const missing = required.filter(
+    (key) => !process.env[key]
+  );
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing Amazon env vars: ${missing.join(", ")}`
+    );
+  }
 }
 
-async function getLWAToken() {
-  if (cachedLWAToken && Date.now() < lwaExpiresAt) return cachedLWAToken;
-  checkCreds();
+/* =========================================================
+   LOGIN WITH AMAZON TOKEN
+========================================================= */
+
+async function getLWAToken(
+  forceRefresh = false
+) {
+  checkRuntimeCredentials();
+
+  if (
+    !forceRefresh &&
+    cachedLWAToken &&
+    Date.now() < lwaExpiresAt - 60_000
+  ) {
+    return cachedLWAToken;
+  }
+
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: process.env.AMAZON_LWA_REFRESH_TOKEN,
-    client_id: process.env.AMAZON_LWA_CLIENT_ID,
-    client_secret: process.env.AMAZON_LWA_CLIENT_SECRET,
+    refresh_token:
+      process.env.AMAZON_LWA_REFRESH_TOKEN,
+    client_id:
+      process.env.AMAZON_LWA_CLIENT_ID,
+    client_secret:
+      process.env.AMAZON_LWA_CLIENT_SECRET
   });
-  const res = await fetch(LWA_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  const data = await res.json();
-  if (!res.ok || !data.access_token) throw new Error("LWA token failed: " + JSON.stringify(data));
-  cachedLWAToken = data.access_token;
-  lwaExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+
+  const response = await fetch(
+    LWA_TOKEN_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded;charset=UTF-8",
+        Accept: "application/json"
+      },
+      body: body.toString()
+    }
+  );
+
+  const responseText =
+    await response.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Amazon LWA returned invalid JSON: ${responseText}`
+    );
+  }
+
+  if (
+    !response.ok ||
+    !data.access_token
+  ) {
+    throw new Error(
+      `Amazon LWA token failed (${response.status}): ${JSON.stringify(
+        data
+      )}`
+    );
+  }
+
+  cachedLWAToken =
+    data.access_token;
+
+  const expiresIn =
+    Number(data.expires_in) || 3600;
+
+  lwaExpiresAt =
+    Date.now() + expiresIn * 1000;
+
   return cachedLWAToken;
 }
 
-async function assumeRole() {
-  if (cachedRoleCreds && Date.now() < roleCredsExpiresAt) return cachedRoleCreds;
-  checkCreds();
-  const roleArn = process.env.AMAZON_SPAPI_ROLE_ARN;
-  const body = `Action=AssumeRole&Version=2011-06-15&RoleArn=${encodeURIComponent(roleArn)}&RoleSessionName=OutfitVaultSession&DurationSeconds=3600`;
-  const headers = sigv4Sign("POST", STS_URL, {}, body, process.env.AMAZON_SPAPI_ACCESS_KEY, process.env.AMAZON_SPAPI_SECRET_KEY, null, "us-east-1", "sts");
-  headers["Content-Type"] = "application/x-www-form-urlencoded";
-  const res = await fetch(STS_URL, { method: "POST", headers, body });
-  const xml = await res.text();
-  if (!res.ok) throw new Error("STS AssumeRole failed: " + xml);
-  const accessKeyId = xml.match(/<AccessKeyId>([^<]+)<\/AccessKeyId>/)?.[1];
-  const secretAccessKey = xml.match(/<SecretAccessKey>([^<]+)<\/SecretAccessKey>/)?.[1];
-  const sessionToken = xml.match(/<SessionToken>([^<]+)<\/SessionToken>/)?.[1];
-  const expiration = xml.match(/<Expiration>([^<]+)<\/Expiration>/)?.[1];
-  if (!accessKeyId || !secretAccessKey || !sessionToken) throw new Error("STS parse failed: " + xml);
-  cachedRoleCreds = { accessKeyId, secretAccessKey, sessionToken };
-  roleCredsExpiresAt = new Date(expiration).getTime() - 5 * 60 * 1000;
-  return cachedRoleCreds;
-}
+/* =========================================================
+   SP-API REQUESTS
+========================================================= */
 
-function sigv4Sign(method, url, headers, body, accessKey, secretKey, sessionToken, region, service) {
-  const urlObj = new URL(url);
-  const host = urlObj.host;
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
+function buildQueryString(query = {}) {
+  const params =
+    new URLSearchParams();
 
-  const headersToSign = { host, "x-amz-date": amzDate, ...headers };
-  if (sessionToken) headersToSign["x-amz-security-token"] = sessionToken;
+  for (const [key, value] of Object.entries(
+    query
+  )) {
+    if (
+      value === undefined ||
+      value === null ||
+      value === ""
+    ) {
+      continue;
+    }
 
-  const sortedKeys = Object.keys(headersToSign).map((k) => k.toLowerCase()).sort();
-  const canonicalHeaders = sortedKeys.map((k) => `${k}:${String(headersToSign[k]).trim()}\n`).join("");
-  const signedHeaders = sortedKeys.join(";");
-
-  const payloadHash = sha256Hex(body || "");
-  const queryParams = [];
-  for (const [k, v] of urlObj.searchParams.entries()) {
-    queryParams.push(`${uriEncode(k)}=${uriEncode(v)}`);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        params.append(key, String(item));
+      }
+    } else {
+      params.append(key, String(value));
+    }
   }
-  queryParams.sort();
-  const canonicalQuery = queryParams.join("&");
-  const canonicalUri = uriEncode(urlObj.pathname, false) || "/";
 
-  const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, payloadHash].join("\n");
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, sha256Hex(canonicalRequest)].join("\n");
-
-  const kDate = hmac("AWS4" + secretKey, dateStamp);
-  const kRegion = hmac(kDate, region);
-  const kService = hmac(kRegion, service);
-  const kSigning = hmac(kService, "aws4_request");
-  const signature = crypto.createHmac("sha256", kSigning).update(stringToSign).digest("hex");
-
-  const authorization = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  const resultHeaders = { ...headersToSign };
-  resultHeaders["authorization"] = authorization;
-  resultHeaders["x-amz-content-sha256"] = payloadHash;
-  return resultHeaders;
+  return params.toString();
 }
 
-async function spApiCall(method, path, query = {}, body = null) {
-  const lwaToken = await getLWAToken();
-  const roleCreds = await assumeRole();
-  const queryString = Object.entries(query).map(([k, v]) => `${uriEncode(k)}=${uriEncode(v)}`).join("&");
-  const url = `https://${SPAPI_HOST}${path}${queryString ? "?" + queryString : ""}`;
-  const bodyStr = body ? JSON.stringify(body) : "";
-  const headers = { "x-amz-access-token": lwaToken };
-  if (body) headers["content-type"] = "application/json";
-  const signedHeaders = sigv4Sign(method, url, headers, bodyStr, roleCreds.accessKeyId, roleCreds.secretAccessKey, roleCreds.sessionToken, SPAPI_REGION, "execute-api");
-  const res = await fetch(url, { method, headers: signedHeaders, body: bodyStr || undefined });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = text; }
-  return { ok: res.ok, status: res.status, data };
+async function spApiCall(
+  method,
+  path,
+  query = {},
+  body = null,
+  allowTokenRetry = true
+) {
+  const lwaToken =
+    await getLWAToken();
+
+  const queryString =
+    buildQueryString(query);
+
+  const url =
+    `https://${SPAPI_HOST}${path}` +
+    (queryString
+      ? `?${queryString}`
+      : "");
+
+  const headers = {
+    Accept: "application/json",
+    "x-amz-access-token": lwaToken,
+    "x-amz-date": new Date()
+      .toISOString()
+      .replace(/[:-]|\.\d{3}/g, ""),
+    "user-agent": USER_AGENT
+  };
+
+  let requestBody;
+
+  if (body !== null) {
+    headers["Content-Type"] =
+      "application/json";
+
+    requestBody =
+      JSON.stringify(body);
+  }
+
+  const response = await fetch(
+    url,
+    {
+      method,
+      headers,
+      body: requestBody
+    }
+  );
+
+  if (
+    (response.status === 401 ||
+      response.status === 403) &&
+    allowTokenRetry
+  ) {
+    cachedLWAToken = null;
+    lwaExpiresAt = 0;
+
+    await getLWAToken(true);
+
+    return spApiCall(
+      method,
+      path,
+      query,
+      body,
+      false
+    );
+  }
+
+  const responseText =
+    await response.text();
+
+  let data = null;
+
+  if (responseText) {
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      data = responseText;
+    }
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data
+  };
 }
 
-function mapProductType(category) {
-  const map = { Tops: "SHIRT", Bottoms: "PANTS", Dresses: "DRESS", Shoes: "SHOE", Accessories: "ACCESSORY", Outerwear: "OUTERWEAR" };
-  return map[category] || "PRODUCT";
+function amazonError(result) {
+  if (
+    typeof result.data === "string"
+  ) {
+    return result.data;
+  }
+
+  return JSON.stringify(
+    result.data || {
+      message: "Unknown Amazon error"
+    }
+  );
+}
+
+/* =========================================================
+   PRODUCT LISTING HELPERS
+========================================================= */
+
+function mapProductType(product = {}) {
+  const combined = [
+    product.category,
+    product.product_type,
+    product.productType,
+    product.product_name,
+    product.productTitle
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (
+    combined.includes("jean") ||
+    combined.includes("pants") ||
+    combined.includes("trouser")
+  ) {
+    return "PANTS";
+  }
+
+  if (
+    combined.includes("dress")
+  ) {
+    return "DRESS";
+  }
+
+  if (
+    combined.includes("shirt") ||
+    combined.includes("top") ||
+    combined.includes("blouse")
+  ) {
+    return "SHIRT";
+  }
+
+  if (
+    combined.includes("shoe") ||
+    combined.includes("boot") ||
+    combined.includes("sneaker")
+  ) {
+    return "SHOES";
+  }
+
+  if (
+    combined.includes("jacket") ||
+    combined.includes("coat") ||
+    combined.includes("outerwear")
+  ) {
+    return "OUTERWEAR";
+  }
+
+  return (
+    product.amazon_product_type ||
+    "PRODUCT"
+  );
+}
+
+function normalizeImages(product) {
+  if (
+    Array.isArray(
+      product.product_images
+    )
+  ) {
+    return product.product_images.filter(
+      Boolean
+    );
+  }
+
+  if (
+    Array.isArray(product.images)
+  ) {
+    return product.images.filter(Boolean);
+  }
+
+  if (product.image) {
+    return [product.image];
+  }
+
+  return [];
 }
 
 function buildListingBody(product) {
-  const marketplaceId = getMarketplace();
-  const price = String(product.sale_price || product.price || 0);
-  const attrs = {
-    item_name: [{ value: String(product.product_name).slice(0, 200), marketplace_id: marketplaceId, language_tag: "en_US" }],
-    brand: [{ value: product.brand || "The Outfit Vault" }],
-    fulfillment_availability: [{ fulfillment_channel_code: "DEFAULT", quantity: Number(product.inventory_quantity) || 0 }],
-    purchasable_offer: [{
-      marketplace_id: marketplaceId,
-      currency: "USD",
-      our_price: [{ amount: price, currency_code: "USD" }],
-    }],
+  const marketplaceId =
+    getMarketplace();
+
+  const title = String(
+    product.product_name ||
+      product.productTitle ||
+      product.title ||
+      "The Outfit Vault Product"
+  ).slice(0, 200);
+
+  const price = String(
+    product.sale_price ||
+      product.price ||
+      "0"
+  );
+
+  const images =
+    normalizeImages(product);
+
+  const attributes = {
+    item_name: [
+      {
+        value: title,
+        marketplace_id:
+          marketplaceId,
+        language_tag: "en_US"
+      }
+    ],
+
+    brand: [
+      {
+        value:
+          product.brand ||
+          product.vendor ||
+          "The Outfit Vault",
+        marketplace_id:
+          marketplaceId
+      }
+    ],
+
+    fulfillment_availability: [
+      {
+        fulfillment_channel_code:
+          "DEFAULT",
+        quantity:
+          Number(
+            product.inventory_quantity ??
+              product.inventoryQuantity
+          ) || 0
+      }
+    ],
+
+    purchasable_offer: [
+      {
+        marketplace_id:
+          marketplaceId,
+        currency: "USD",
+        our_price: [
+          {
+            amount: price,
+            currency_code: "USD"
+          }
+        ]
+      }
+    ]
   };
-  if (product.description) {
-    attrs.item_description = [{ value: String(product.description).slice(0, 2000), marketplace_id: marketplaceId, language_tag: "en_US" }];
+
+  const description =
+    product.description ||
+    product.descriptionHtml;
+
+  if (description) {
+    attributes.item_description = [
+      {
+        value: String(description)
+          .replace(/<[^>]*>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 2000),
+        marketplace_id:
+          marketplaceId,
+        language_tag: "en_US"
+      }
+    ];
   }
-  if (product.product_images && product.product_images.length) {
-    attrs.main_product_image_locator = [{ marketplace_id: marketplaceId, value: product.product_images[0] }];
-    if (product.product_images.length > 1) {
-      attrs.other_product_image_locator_1 = [{ marketplace_id: marketplaceId, value: product.product_images[1] }];
-    }
+
+  if (images[0]) {
+    attributes.main_product_image_locator =
+      [
+        {
+          marketplace_id:
+            marketplaceId,
+          value: images[0]
+        }
+      ];
   }
+
+  for (
+    let index = 1;
+    index < Math.min(images.length, 9);
+    index++
+  ) {
+    attributes[
+      `other_product_image_locator_${index}`
+    ] = [
+      {
+        marketplace_id:
+          marketplaceId,
+        value: images[index]
+      }
+    ];
+  }
+
+  if (
+    product.barcode ||
+    product.gtin
+  ) {
+    attributes.externally_assigned_product_identifier =
+      [
+        {
+          marketplace_id:
+            marketplaceId,
+          type:
+            String(
+              product.barcode ||
+                product.gtin
+            ).length === 12
+              ? "upc"
+              : "ean",
+          value:
+            product.barcode ||
+            product.gtin
+        }
+      ];
+  }
+
   return {
-    productType: mapProductType(product.category),
+    productType:
+      mapProductType(product),
     requirements: "LISTING",
-    attributes: attrs,
+    attributes
   };
 }
+
+async function getExistingProductType(
+  sku
+) {
+  const sellerId = getSellerId();
+
+  const path =
+    `/listings/2021-08-01/items/` +
+    `${encodeURIComponent(
+      sellerId
+    )}/${encodeURIComponent(sku)}`;
+
+  const result = await spApiCall(
+    "GET",
+    path,
+    {
+      marketplaceIds:
+        getMarketplace(),
+      includedData:
+        "summaries"
+    }
+  );
+
+  if (!result.ok) {
+    return "PRODUCT";
+  }
+
+  return (
+    result.data?.summaries?.[0]
+      ?.productType ||
+    result.data?.productType ||
+    "PRODUCT"
+  );
+}
+
+/* =========================================================
+   CONNECTION TEST
+========================================================= */
 
 export async function checkConnection() {
   try {
-    checkCreds();
-    await getLWAToken();
-    await assumeRole();
-    return { success: true, seller_id: getSellerId(), marketplace: getMarketplace() };
-  } catch (e) {
-    return { success: false, error: e.message };
+    checkRuntimeCredentials();
+
+    const result = await spApiCall(
+      "GET",
+      "/sellers/v1/marketplaceParticipations"
+    );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        status: result.status,
+        error: amazonError(result)
+      };
+    }
+
+    return {
+      success: true,
+      seller_id: getSellerId(),
+      marketplace:
+        getMarketplace(),
+      participations:
+        result.data?.payload || []
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
-export async function publishListing(product) {
-  const sellerId = getSellerId();
-  const sku = product.amazon_sku || `OV-${product.id}`;
-  const path = `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
-  const body = buildListingBody({ ...product, amazon_sku: sku });
-  const result = await spApiCall("PUT", path, {}, body);
-  if (result.ok) return { success: true, sku, status: "LISTED" };
-  return { success: false, sku, error: typeof result.data === "string" ? result.data : JSON.stringify(result.data), status: result.status };
+export async function testConnection() {
+  return checkConnection();
 }
 
-export async function syncInventory(sku, quantity) {
-  const sellerId = getSellerId();
-  const path = `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
-  const body = {
-    productType: "PRODUCT",
-    requirements: "LISTING",
-    attributes: {
-      fulfillment_availability: [{ fulfillment_channel_code: "DEFAULT", quantity: Number(quantity) || 0 }],
-    },
-  };
-  const result = await spApiCall("PATCH", path, { mode: "PARTIAL" }, body);
-  if (result.ok) return { success: true, sku, quantity };
-  return { success: false, sku, error: typeof result.data === "string" ? result.data : JSON.stringify(result.data) };
+/* =========================================================
+   LISTING CREATION
+========================================================= */
+
+export async function publishListing(
+  product
+) {
+  try {
+    checkRuntimeCredentials();
+
+    const sellerId =
+      getSellerId();
+
+    const sku = String(
+      product.amazon_sku ||
+        product.sku ||
+        `OV-${product.id}`
+    );
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(
+        sellerId
+      )}/${encodeURIComponent(sku)}`;
+
+    const body =
+      buildListingBody({
+        ...product,
+        amazon_sku: sku
+      });
+
+    const result =
+      await spApiCall(
+        "PUT",
+        path,
+        {
+          marketplaceIds:
+            getMarketplace(),
+          includedData: "issues"
+        },
+        body
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        sku,
+        status: "SUBMITTED",
+        data: result.data
+      };
+    }
+
+    return {
+      success: false,
+      sku,
+      status: result.status,
+      error: amazonError(result),
+      data: result.data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 }
 
-export async function syncPrice(sku, price) {
-  const sellerId = getSellerId();
-  const path = `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
-  const body = {
-    productType: "PRODUCT",
-    requirements: "LISTING",
-    attributes: {
-      purchasable_offer: [{
-        marketplace_id: getMarketplace(),
-        currency: "USD",
-        our_price: [{ amount: String(price), currency_code: "USD" }],
-      }],
-    },
-  };
-  const result = await spApiCall("PATCH", path, { mode: "PARTIAL" }, body);
-  if (result.ok) return { success: true, sku, price };
-  return { success: false, sku, error: typeof result.data === "string" ? result.data : JSON.stringify(result.data) };
+/* =========================================================
+   INVENTORY
+========================================================= */
+
+export async function syncInventory(
+  sku,
+  quantity
+) {
+  try {
+    checkRuntimeCredentials();
+
+    const sellerId =
+      getSellerId();
+
+    const productType =
+      await getExistingProductType(sku);
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(
+        sellerId
+      )}/${encodeURIComponent(sku)}`;
+
+    const body = {
+      productType,
+      patches: [
+        {
+          op: "replace",
+          path:
+            "/attributes/fulfillment_availability",
+          value: [
+            {
+              fulfillment_channel_code:
+                "DEFAULT",
+              quantity:
+                Math.max(
+                  0,
+                  Number(quantity) || 0
+                )
+            }
+          ]
+        }
+      ]
+    };
+
+    const result =
+      await spApiCall(
+        "PATCH",
+        path,
+        {
+          marketplaceIds:
+            getMarketplace(),
+          includedData: "issues"
+        },
+        body
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        sku,
+        quantity,
+        data: result.data
+      };
+    }
+
+    return {
+      success: false,
+      sku,
+      status: result.status,
+      error: amazonError(result)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sku,
+      error: error.message
+    };
+  }
 }
 
-export async function getListingStatus(sku) {
-  const sellerId = getSellerId();
-  const path = `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
-  const result = await spApiCall("GET", path, { marketplaceIds: getMarketplace(), includedData: "summaries" });
-  if (result.ok) return { success: true, sku, data: result.data };
-  return { success: false, sku, error: typeof result.data === "string" ? result.data : JSON.stringify(result.data) };
+/* =========================================================
+   PRICE
+========================================================= */
+
+export async function syncPrice(
+  sku,
+  price
+) {
+  try {
+    checkRuntimeCredentials();
+
+    const sellerId =
+      getSellerId();
+
+    const productType =
+      await getExistingProductType(sku);
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(
+        sellerId
+      )}/${encodeURIComponent(sku)}`;
+
+    const body = {
+      productType,
+      patches: [
+        {
+          op: "replace",
+          path:
+            "/attributes/purchasable_offer",
+          value: [
+            {
+              marketplace_id:
+                getMarketplace(),
+              currency: "USD",
+              our_price: [
+                {
+                  amount:
+                    String(price),
+                  currency_code:
+                    "USD"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+
+    const result =
+      await spApiCall(
+        "PATCH",
+        path,
+        {
+          marketplaceIds:
+            getMarketplace(),
+          includedData: "issues"
+        },
+        body
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        sku,
+        price,
+        data: result.data
+      };
+    }
+
+    return {
+      success: false,
+      sku,
+      status: result.status,
+      error: amazonError(result)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sku,
+      error: error.message
+    };
+  }
 }
 
-export async function getOrders(createdAfter) {
-  const path = "/orders/v0/orders";
-  const query = {
-    MarketplaceIds: getMarketplace(),
-    CreatedAfter: createdAfter || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-  };
-  const result = await spApiCall("GET", path, query);
-  if (result.ok) return { success: true, orders: result.data?.payload?.Orders || [] };
-  return { success: false, error: typeof result.data === "string" ? result.data : JSON.stringify(result.data) };
+/* =========================================================
+   LISTING STATUS
+========================================================= */
+
+export async function getListingStatus(
+  sku
+) {
+  try {
+    checkRuntimeCredentials();
+
+    const sellerId =
+      getSellerId();
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(
+        sellerId
+      )}/${encodeURIComponent(sku)}`;
+
+    const result =
+      await spApiCall(
+        "GET",
+        path,
+        {
+          marketplaceIds:
+            getMarketplace(),
+          includedData:
+            "summaries,issues,attributes"
+        }
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        sku,
+        data: result.data
+      };
+    }
+
+    return {
+      success: false,
+      sku,
+      status: result.status,
+      error: amazonError(result)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sku,
+      error: error.message
+    };
+  }
 }
 
-export async function updateAmazonTracking(orderId, trackingNumber, carrier) {
-  const path = `/orders/v0/orders/${encodeURIComponent(orderId)}/shipment`;
-  const body = {
-    marketplaceId: getMarketplace(),
-    packageDetails: {
-      trackingNumber,
-      carrierCode: carrier || "UPS",
-    },
-  };
-  const result = await spApiCall("POST", path, {}, body);
-  if (result.ok) return { success: true, orderId, trackingNumber };
-  return { success: false, orderId, error: typeof result.data === "string" ? result.data : JSON.stringify(result.data) };
+/* =========================================================
+   ORDERS
+========================================================= */
+
+export async function getOrders(
+  createdAfter
+) {
+  try {
+    checkRuntimeCredentials();
+
+    const result =
+      await spApiCall(
+        "GET",
+        "/orders/v0/orders",
+        {
+          MarketplaceIds:
+            getMarketplace(),
+          CreatedAfter:
+            createdAfter ||
+            new Date(
+              Date.now() -
+                7 *
+                  24 *
+                  60 *
+                  60 *
+                  1000
+            ).toISOString()
+        }
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        orders:
+          result.data?.payload
+            ?.Orders || [],
+        nextToken:
+          result.data?.payload
+            ?.NextToken || null
+      };
+    }
+
+    return {
+      success: false,
+      status: result.status,
+      error: amazonError(result)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 }
 
-export function getAuthUrl(redirectUri) {
-  const clientId = process.env.AMAZON_LWA_CLIENT_ID;
-  if (!clientId) throw new Error("Missing AMAZON_LWA_CLIENT_ID");
-  const params = new URLSearchParams({
-    client_id: clientId,
-    scope: "sellingpartnerapi::migration",
-    response_type: "code",
-    redirect_uri: redirectUri,
-  });
-  return `https://sellercentral.amazon.com/apps/external/consent?${params.toString()}`;
-}
-
-export async function exchangeAuthCode(code, redirectUri) {
-  checkCreds();
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    client_id: process.env.AMAZON_LWA_CLIENT_ID,
-    client_secret: process.env.AMAZON_LWA_CLIENT_SECRET,
-    redirect_uri: redirectUri,
-  });
-  const res = await fetch(LWA_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  const data = await res.json();
-  if (!res.ok || !data.refresh_token) throw new Error("Token exchange failed: " + JSON.stringify(data));
-  return data.refresh_token;
-}
-export async function getOrderItems(orderId) {
+export async function getOrderItems(
+  orderId
+) {
   if (!orderId) {
     return {
       success: false,
-      error: "Amazon order ID is required",
+      error:
+        "Amazon order ID is required"
     };
   }
 
-  const path = `/orders/v0/orders/${encodeURIComponent(orderId)}/orderItems`;
-  const result = await spApiCall("GET", path);
+  try {
+    checkRuntimeCredentials();
 
-  if (result.ok) {
+    const path =
+      `/orders/v0/orders/` +
+      `${encodeURIComponent(
+        orderId
+      )}/orderItems`;
+
+    const result =
+      await spApiCall(
+        "GET",
+        path
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        orderId,
+        orderItems:
+          result.data?.payload
+            ?.OrderItems || [],
+        nextToken:
+          result.data?.payload
+            ?.NextToken || null
+      };
+    }
+
     return {
-      success: true,
+      success: false,
       orderId,
-      orderItems: result.data?.payload?.OrderItems || [],
+      status: result.status,
+      error: amazonError(result)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      orderId,
+      error: error.message
     };
   }
-
-  return {
-    success: false,
-    orderId,
-    status: result.status,
-    error:
-      typeof result.data === "string"
-        ? result.data
-        : JSON.stringify(result.data),
-  };
 }
-export async function testConnection() {
-  return checkConnection();
+
+/* =========================================================
+   SHIPMENT CONFIRMATION
+========================================================= */
+
+export async function updateAmazonTracking(
+  orderId,
+  trackingNumber,
+  carrier
+) {
+  try {
+    checkRuntimeCredentials();
+
+    if (
+      !orderId ||
+      !trackingNumber
+    ) {
+      return {
+        success: false,
+        error:
+          "orderId and trackingNumber are required"
+      };
+    }
+
+    const orderItemsResult =
+      await getOrderItems(orderId);
+
+    if (!orderItemsResult.success) {
+      return orderItemsResult;
+    }
+
+    const orderItems =
+      orderItemsResult.orderItems.map(
+        (item) => ({
+          orderItemId:
+            item.OrderItemId,
+          quantity:
+            Number(
+              item.QuantityOrdered
+            ) || 1
+        })
+      );
+
+    const path =
+      `/orders/v0/orders/` +
+      `${encodeURIComponent(
+        orderId
+      )}/shipmentConfirmation`;
+
+    const body = {
+      packageDetail: {
+        packageReferenceId: "1",
+        carrierCode:
+          carrier || "UPS",
+        shippingMethod:
+          carrier || "Standard",
+        trackingNumber,
+        shipDate:
+          new Date().toISOString(),
+        orderItems
+      },
+      marketplaceId:
+        getMarketplace()
+    };
+
+    const result =
+      await spApiCall(
+        "POST",
+        path,
+        {},
+        body
+      );
+
+    if (result.ok) {
+      return {
+        success: true,
+        orderId,
+        trackingNumber
+      };
+    }
+
+    return {
+      success: false,
+      orderId,
+      status: result.status,
+      error: amazonError(result)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      orderId,
+      error: error.message
+    };
+  }
+}
+
+/* =========================================================
+   AMAZON OAUTH
+========================================================= */
+
+export function getAuthUrl(
+  state,
+  _redirectUri
+) {
+  const applicationId =
+    process.env.AMAZON_SPAPI_APP_ID;
+
+  if (!applicationId) {
+    throw new Error(
+      "Missing AMAZON_SPAPI_APP_ID"
+    );
+  }
+
+  const sellerCentralUrl =
+    process.env
+      .AMAZON_SELLER_CENTRAL_URL ||
+    "https://sellercentral.amazon.com";
+
+  const params =
+    new URLSearchParams({
+      application_id:
+        applicationId,
+      state:
+        state ||
+        Math.random()
+          .toString(36)
+          .slice(2)
+    });
+
+  const appVersion = String(
+    process.env
+      .AMAZON_SPAPI_APP_VERSION ||
+      "beta"
+  ).toLowerCase();
+
+  if (appVersion === "beta") {
+    params.set(
+      "version",
+      "beta"
+    );
+  }
+
+  return (
+    `${sellerCentralUrl}` +
+    `/apps/authorize/consent?` +
+    params.toString()
+  );
+}
+
+export async function exchangeAuthCode(
+  code,
+  redirectUri
+) {
+  checkLwaCredentials();
+
+  if (!code) {
+    throw new Error(
+      "Missing Amazon authorization code"
+    );
+  }
+
+  if (!redirectUri) {
+    throw new Error(
+      "Missing Amazon OAuth redirect URI"
+    );
+  }
+
+  const body =
+    new URLSearchParams({
+      grant_type:
+        "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id:
+        process.env
+          .AMAZON_LWA_CLIENT_ID,
+      client_secret:
+        process.env
+          .AMAZON_LWA_CLIENT_SECRET
+    });
+
+  const response = await fetch(
+    LWA_TOKEN_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/x-www-form-urlencoded;charset=UTF-8",
+        Accept: "application/json"
+      },
+      body: body.toString()
+    }
+  );
+
+  const responseText =
+    await response.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Amazon token exchange returned invalid JSON: ${responseText}`
+    );
+  }
+
+  if (
+    !response.ok ||
+    !data.refresh_token
+  ) {
+    throw new Error(
+      `Amazon token exchange failed (${response.status}): ${JSON.stringify(
+        data
+      )}`
+    );
+  }
+
+  return data;
 }
