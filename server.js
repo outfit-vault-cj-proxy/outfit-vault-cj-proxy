@@ -623,4 +623,8 @@ app.post("/amazon/tracking", async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
+const PORT = process.env.PORT || 3000;
 
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Outfit Vault proxy running on port ${PORT}`);
+});
