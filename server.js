@@ -27,6 +27,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: false }));
 
 /* =========================================================
    CONFIGURATION
@@ -77,6 +78,22 @@ function jsonError(
   });
 }
 
+function responseStatus(data) {
+  if (data?.success) {
+    return 200;
+  }
+
+  if (
+    Number.isInteger(
+      data?.status
+    )
+  ) {
+    return data.status;
+  }
+
+  return 502;
+}
+
 async function readJsonResponse(
   response,
   serviceName
@@ -97,22 +114,6 @@ async function readJsonResponse(
       `${serviceName} returned invalid JSON (${response.status}): ${responseText}`
     );
   }
-}
-
-function responseStatus(data) {
-  if (data?.success) {
-    return 200;
-  }
-
-  if (
-    Number.isInteger(
-      data?.status
-    )
-  ) {
-    return data.status;
-  }
-
-  return 502;
 }
 
 /* =========================================================
@@ -535,7 +536,9 @@ async function publishProduct(
     data?.publishablePublish
       ?.userErrors || [];
 
-  if (errors.length > 0) {
+  if (
+    errors.length > 0
+  ) {
     throw new Error(
       `Shopify publication failed: ${JSON.stringify(
         errors
@@ -558,7 +561,9 @@ app.get(
       message:
         "The Outfit Vault proxy is running",
       version:
-        "amazon-offer-engine-v3"
+        "amazon-publish-page-v4",
+      publishPage:
+        "/amazon/publish-page"
     });
   }
 );
@@ -590,7 +595,9 @@ app.get(
 
     let shopifyError = null;
 
-    if (shopifyConfigured) {
+    if (
+      shopifyConfigured
+    ) {
       try {
         await getShopifyAccessToken();
 
@@ -605,7 +612,7 @@ app.get(
     res.json({
       success: true,
       version:
-        "amazon-offer-engine-v3",
+        "amazon-publish-page-v4",
       shopifyConfigured,
       shopifyAuthenticated,
       shopifyError,
@@ -623,54 +630,9 @@ app.get(
       amazonPreviewRoute:
         "/amazon/offer/preview",
       amazonCreateRoute:
-        "/amazon/offer/create"
-    });
-  }
-);
-
-app.get(
-  "/debug/routes",
-  (req, res) => {
-    const routes = [];
-
-    for (
-      const layer of
-      app._router?.stack ||
-      []
-    ) {
-      if (!layer.route) {
-        continue;
-      }
-
-      const methods =
-        Object.keys(
-          layer.route
-            .methods || {}
-        )
-          .filter(
-            (method) =>
-              layer.route
-                .methods[method]
-          )
-          .map(
-            (method) =>
-              method.toUpperCase()
-          );
-
-      routes.push({
-        path:
-          layer.route.path,
-        methods
-      });
-    }
-
-    res.json({
-      success: true,
-      version:
-        "amazon-offer-engine-v3",
-      routeCount:
-        routes.length,
-      routes
+        "/amazon/offer/create",
+      amazonPublishPage:
+        "/amazon/publish-page"
     });
   }
 );
@@ -689,10 +651,12 @@ app.get(
         "";
 
       const page =
-        req.query.page || 1;
+        req.query.page ||
+        1;
 
       const size =
-        req.query.size || 20;
+        req.query.size ||
+        20;
 
       const data =
         await cjGet(
@@ -790,9 +754,12 @@ app.get(
       const products = [];
 
       let cursor = null;
-      let hasNextPage = true;
+      let hasNextPage =
+        true;
 
-      while (hasNextPage) {
+      while (
+        hasNextPage
+      ) {
         const query = `
           query Products(
             $first: Int!,
@@ -1027,7 +994,9 @@ app.get(
             }
           );
 
-        if (data.product) {
+        if (
+          data.product
+        ) {
           addProductVariants(
             data.product
           );
@@ -1166,7 +1135,9 @@ app.get(
 
       res.set(
         "X-Shopify-Product-Count",
-        String(productCount)
+        String(
+          productCount
+        )
       );
 
       res.set(
@@ -1303,14 +1274,18 @@ app.post(
           const variables = {
             product: {
               title:
-                product.productNameEn ||
-                product.productName ||
+                product
+                  .productNameEn ||
+                product
+                  .productName ||
                 selected.name ||
                 "Imported CJ Product",
 
               descriptionHtml:
-                product.description ||
-                product.productDescription ||
+                product
+                  .description ||
+                product
+                  .productDescription ||
                 selected.description ||
                 "",
 
@@ -1318,8 +1293,10 @@ app.post(
                 "CJ Dropshipping",
 
               productType:
-                product.categoryName ||
-                product.threeCategoryName ||
+                product
+                  .categoryName ||
+                product
+                  .threeCategoryName ||
                 "Dropshipping",
 
               tags: [
@@ -1342,8 +1319,10 @@ app.post(
                     originalSource:
                       image,
                     alt:
-                      product.productNameEn ||
-                      product.productName ||
+                      product
+                        .productNameEn ||
+                      product
+                        .productName ||
                       "Product image"
                   })
                 )
@@ -1528,13 +1507,7 @@ app.get(
         return jsonError(
           res,
           400,
-          "identifier is required",
-          {
-            examples: [
-              "/amazon/catalog/search?upc=889359349981",
-              "/amazon/catalog/search?identifier=889359349981&type=UPC"
-            ]
-          }
+          "identifier is required"
         );
       }
 
@@ -1562,7 +1535,7 @@ app.get(
 );
 
 /* =========================================================
-   AMAZON OFFER-ONLY ENGINE
+   AMAZON OFFER ENGINE
 ========================================================= */
 
 app.get(
@@ -1572,27 +1545,19 @@ app.get(
       const asin =
         req.query.asin;
 
-      const conditionType =
-        req.query.conditionType ||
-        req.query.condition ||
-        "new_new";
-
       if (!asin) {
         return jsonError(
           res,
           400,
-          "asin required",
-          {
-            example:
-              "/amazon/offer/restrictions?asin=B077SH7LZH"
-          }
+          "asin required"
         );
       }
 
       const data =
         await getListingRestrictions(
           asin,
-          conditionType
+          req.query.condition ||
+            "new_new"
         );
 
       res
@@ -1651,22 +1616,8 @@ app.get(
         )
         .json({
           ...data,
-          testProduct: {
-            asin:
-              product.asin,
-            sku:
-              product.sku,
-            price:
-              Number(
-                product.price
-              ),
-            quantity:
-              Number(
-                product.quantity
-              ),
-            condition:
-              product.condition_type
-          }
+          testProduct:
+            product
         });
     } catch (error) {
       jsonError(
@@ -1784,6 +1735,339 @@ app.post(
         error
       );
     }
+  }
+);
+
+/* =========================================================
+   ONE-TAP AMAZON PUBLISH PAGE
+========================================================= */
+
+app.get(
+  "/amazon/publish-page",
+  (req, res) => {
+    res.set(
+      "Cache-Control",
+      "no-store"
+    );
+
+    res.type(
+      "html"
+    );
+
+    res.send(`
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+
+  <title>
+    Publish to Amazon
+  </title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #101017;
+      color: #ffffff;
+      font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+    }
+
+    .card {
+      max-width: 520px;
+      margin: 25px auto;
+      padding: 24px;
+      background: #1d1d29;
+      border: 1px solid #38384a;
+      border-radius: 18px;
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    .warning {
+      padding: 13px;
+      margin-bottom: 18px;
+      background: #342814;
+      border: 1px solid #735923;
+      border-radius: 11px;
+      color: #ffe5a0;
+    }
+
+    label {
+      display: block;
+      margin-top: 16px;
+      margin-bottom: 7px;
+      font-weight: 700;
+    }
+
+    input {
+      width: 100%;
+      min-height: 50px;
+      padding: 12px;
+      color: #ffffff;
+      background: #0f0f17;
+      border: 1px solid #4c4c61;
+      border-radius: 11px;
+      font-size: 17px;
+    }
+
+    button {
+      width: 100%;
+      min-height: 56px;
+      margin-top: 22px;
+      padding: 15px;
+      background: #d5a62a;
+      color: #171208;
+      border: 0;
+      border-radius: 12px;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+    }
+
+    pre {
+      margin-top: 20px;
+      padding: 14px;
+      min-height: 80px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #09090e;
+      border-radius: 10px;
+      color: #e8e8ef;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="card">
+    <h1>
+      Publish to Amazon
+    </h1>
+
+    <div class="warning">
+      This button submits a real Amazon offer.
+      Review every field before publishing.
+    </div>
+
+    <label for="asin">
+      Amazon ASIN
+    </label>
+
+    <input
+      id="asin"
+      value="B077SH7LZH"
+      maxlength="10"
+    >
+
+    <label for="sku">
+      Seller SKU
+    </label>
+
+    <input
+      id="sku"
+      value="AI7AR"
+    >
+
+    <label for="price">
+      Price
+    </label>
+
+    <input
+      id="price"
+      value="86.95"
+      type="number"
+      min="0.01"
+      step="0.01"
+    >
+
+    <label for="quantity">
+      Quantity
+    </label>
+
+    <input
+      id="quantity"
+      value="1"
+      type="number"
+      min="0"
+      step="1"
+    >
+
+    <button
+      id="publishButton"
+      type="button"
+    >
+      Publish to Amazon
+    </button>
+
+    <pre id="result">
+Ready to publish.
+    </pre>
+  </main>
+
+  <script>
+    const publishButton =
+      document.getElementById(
+        "publishButton"
+      );
+
+    const resultBox =
+      document.getElementById(
+        "result"
+      );
+
+    publishButton.addEventListener(
+      "click",
+      async () => {
+        const asin =
+          document
+            .getElementById(
+              "asin"
+            )
+            .value
+            .trim()
+            .toUpperCase();
+
+        const sku =
+          document
+            .getElementById(
+              "sku"
+            )
+            .value
+            .trim();
+
+        const price =
+          Number(
+            document
+              .getElementById(
+                "price"
+              )
+              .value
+          );
+
+        const quantity =
+          Number(
+            document
+              .getElementById(
+                "quantity"
+              )
+              .value
+          );
+
+        if (
+          !asin ||
+          !sku ||
+          !Number.isFinite(price) ||
+          price <= 0 ||
+          !Number.isInteger(quantity) ||
+          quantity < 0
+        ) {
+          resultBox.textContent =
+            "Please enter a valid ASIN, SKU, price and quantity.";
+
+          return;
+        }
+
+        const confirmed =
+          window.confirm(
+            "This will submit a real Amazon offer for ASIN " +
+            asin +
+            " at $" +
+            price.toFixed(2) +
+            ". Continue?"
+          );
+
+        if (!confirmed) {
+          return;
+        }
+
+        publishButton.disabled =
+          true;
+
+        publishButton.textContent =
+          "Publishing...";
+
+        resultBox.textContent =
+          "Checking restrictions, validating and submitting to Amazon...";
+
+        try {
+          const response =
+            await fetch(
+              "/amazon/offer/create",
+              {
+                method:
+                  "POST",
+
+                headers: {
+                  "Content-Type":
+                    "application/json"
+                },
+
+                body:
+                  JSON.stringify({
+                    asin,
+                    sku,
+                    price,
+                    quantity,
+                    condition_type:
+                      "new_new"
+                  })
+              }
+            );
+
+          const data =
+            await response.json();
+
+          resultBox.textContent =
+            JSON.stringify(
+              data,
+              null,
+              2
+            );
+
+          if (data.success) {
+            publishButton.textContent =
+              "Submitted to Amazon";
+          } else {
+            publishButton.textContent =
+              "Try Again";
+          }
+        } catch (error) {
+          resultBox.textContent =
+            "Error: " +
+            error.message;
+
+          publishButton.textContent =
+            "Try Again";
+        } finally {
+          publishButton.disabled =
+            false;
+        }
+      }
+    );
+  </script>
+</body>
+</html>
+    `);
   }
 );
 
@@ -1926,7 +2210,9 @@ async function handleAmazonOAuthCallback(
             : "0"
       });
 
-    if (storage.error) {
+    if (
+      storage.error
+    ) {
       params.set(
         "error",
         storage.error
@@ -2302,6 +2588,59 @@ app.post(
 );
 
 /* =========================================================
+   ROUTE CHECK
+========================================================= */
+
+app.get(
+  "/debug/routes",
+  (req, res) => {
+    const routes = [];
+
+    for (
+      const layer of
+      app._router?.stack ||
+      []
+    ) {
+      if (
+        !layer.route
+      ) {
+        continue;
+      }
+
+      const methods =
+        Object.keys(
+          layer.route.methods ||
+          {}
+        )
+          .filter(
+            (method) =>
+              layer.route
+                .methods[method]
+          )
+          .map(
+            (method) =>
+              method.toUpperCase()
+          );
+
+      routes.push({
+        path:
+          layer.route.path,
+        methods
+      });
+    }
+
+    res.json({
+      success: true,
+      version:
+        "amazon-publish-page-v4",
+      routeCount:
+        routes.length,
+      routes
+    });
+  }
+);
+
+/* =========================================================
    JSON 404
 ========================================================= */
 
@@ -2316,9 +2655,9 @@ app.use(
       path:
         req.path,
       version:
-        "amazon-offer-engine-v3",
-      routeCheck:
-        "/debug/routes",
+        "amazon-publish-page-v4",
+      publishPage:
+        "/amazon/publish-page",
       catalogSearch:
         "/amazon/catalog/search?upc=889359349981",
       offerPreview:
@@ -2340,19 +2679,23 @@ app.listen(
     );
 
     console.log(
-      "Server version: amazon-offer-engine-v3"
+      "Server version: amazon-publish-page-v4"
     );
 
     console.log(
-      "Amazon catalog route active: GET /amazon/catalog/search"
+      "Amazon catalog route: GET /amazon/catalog/search"
     );
 
     console.log(
-      "Amazon offer preview active: GET/POST /amazon/offer/preview"
+      "Amazon offer preview: GET/POST /amazon/offer/preview"
     );
 
     console.log(
-      "Amazon offer creation active: POST /amazon/offer/create"
+      "Amazon offer create: POST /amazon/offer/create"
+    );
+
+    console.log(
+      "Amazon publishing page: GET /amazon/publish-page"
     );
   }
 );
