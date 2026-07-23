@@ -165,10 +165,16 @@ function buildQueryString(query = {}) {
 
     if (Array.isArray(value)) {
       for (const item of value) {
-        params.append(key, String(item));
+        params.append(
+          key,
+          String(item)
+        );
       }
     } else {
-      params.append(key, String(value));
+      params.append(
+        key,
+        String(value)
+      );
     }
   }
 
@@ -190,16 +196,21 @@ async function spApiCall(
 
   const url =
     `https://${SPAPI_HOST}${path}` +
-    (queryString
-      ? `?${queryString}`
-      : "");
+    (
+      queryString
+        ? `?${queryString}`
+        : ""
+    );
 
   const headers = {
     Accept: "application/json",
     "x-amz-access-token": lwaToken,
     "x-amz-date": new Date()
       .toISOString()
-      .replace(/[:-]|\.\d{3}/g, ""),
+      .replace(
+        /[:-]|\.\d{3}/g,
+        ""
+      ),
     "user-agent": USER_AGENT
   };
 
@@ -223,8 +234,10 @@ async function spApiCall(
   );
 
   if (
-    (response.status === 401 ||
-      response.status === 403) &&
+    (
+      response.status === 401 ||
+      response.status === 403
+    ) &&
     allowTokenRetry
   ) {
     cachedLWAToken = null;
@@ -248,7 +261,8 @@ async function spApiCall(
 
   if (responseText) {
     try {
-      data = JSON.parse(responseText);
+      data =
+        JSON.parse(responseText);
     } catch {
       data = responseText;
     }
@@ -270,7 +284,8 @@ function amazonError(result) {
 
   return JSON.stringify(
     result.data || {
-      message: "Unknown Amazon error"
+      message:
+        "Unknown Amazon error"
     }
   );
 }
@@ -279,13 +294,16 @@ function amazonError(result) {
    PRODUCT LISTING HELPERS
 ========================================================= */
 
-function mapProductType(product = {}) {
+function mapProductType(
+  product = {}
+) {
   const combined = [
     product.category,
     product.product_type,
     product.productType,
     product.product_name,
-    product.productTitle
+    product.productTitle,
+    product.title
   ]
     .filter(Boolean)
     .join(" ")
@@ -347,9 +365,13 @@ function normalizeImages(product) {
   }
 
   if (
-    Array.isArray(product.images)
+    Array.isArray(
+      product.images
+    )
   ) {
-    return product.images.filter(Boolean);
+    return product.images.filter(
+      Boolean
+    );
   }
 
   if (product.image) {
@@ -385,7 +407,8 @@ function buildListingBody(product) {
         value: title,
         marketplace_id:
           marketplaceId,
-        language_tag: "en_US"
+        language_tag:
+          "en_US"
       }
     ],
 
@@ -420,7 +443,8 @@ function buildListingBody(product) {
         our_price: [
           {
             amount: price,
-            currency_code: "USD"
+            currency_code:
+              "USD"
           }
         ]
       }
@@ -435,31 +459,40 @@ function buildListingBody(product) {
     attributes.item_description = [
       {
         value: String(description)
-          .replace(/<[^>]*>/g, " ")
-          .replace(/\s+/g, " ")
+          .replace(
+            /<[^>]*>/g,
+            " "
+          )
+          .replace(
+            /\s+/g,
+            " "
+          )
           .trim()
           .slice(0, 2000),
         marketplace_id:
           marketplaceId,
-        language_tag: "en_US"
+        language_tag:
+          "en_US"
       }
     ];
   }
 
   if (images[0]) {
-    attributes.main_product_image_locator =
-      [
-        {
-          marketplace_id:
-            marketplaceId,
-          value: images[0]
-        }
-      ];
+    attributes.main_product_image_locator = [
+      {
+        marketplace_id:
+          marketplaceId,
+        value: images[0]
+      }
+    ];
   }
 
   for (
     let index = 1;
-    index < Math.min(images.length, 9);
+    index < Math.min(
+      images.length,
+      9
+    );
     index++
   ) {
     attributes[
@@ -473,27 +506,27 @@ function buildListingBody(product) {
     ];
   }
 
-  if (
+  const identifier =
     product.barcode ||
-    product.gtin
-  ) {
-    attributes.externally_assigned_product_identifier =
-      [
-        {
-          marketplace_id:
-            marketplaceId,
-          type:
-            String(
-              product.barcode ||
-                product.gtin
-            ).length === 12
-              ? "upc"
-              : "ean",
-          value:
-            product.barcode ||
-            product.gtin
-        }
-      ];
+    product.gtin;
+
+  if (identifier) {
+    const normalizedIdentifier =
+      String(identifier)
+        .replace(/\D/g, "");
+
+    attributes.externally_assigned_product_identifier = [
+      {
+        marketplace_id:
+          marketplaceId,
+        type:
+          normalizedIdentifier.length === 12
+            ? "upc"
+            : "ean",
+        value:
+          normalizedIdentifier
+      }
+    ];
   }
 
   return {
@@ -507,33 +540,39 @@ function buildListingBody(product) {
 async function getExistingProductType(
   sku
 ) {
-  const sellerId = getSellerId();
+  const sellerId =
+    getSellerId();
 
   const path =
     `/listings/2021-08-01/items/` +
     `${encodeURIComponent(
       sellerId
-    )}/${encodeURIComponent(sku)}`;
+    )}/${encodeURIComponent(
+      sku
+    )}`;
 
-  const result = await spApiCall(
-    "GET",
-    path,
-    {
-      marketplaceIds:
-        getMarketplace(),
-      includedData:
-        "summaries"
-    }
-  );
+  const result =
+    await spApiCall(
+      "GET",
+      path,
+      {
+        marketplaceIds:
+          getMarketplace(),
+        includedData:
+          "summaries"
+      }
+    );
 
   if (!result.ok) {
     return "PRODUCT";
   }
 
   return (
-    result.data?.summaries?.[0]
+    result.data
+      ?.summaries?.[0]
       ?.productType ||
-    result.data?.productType ||
+    result.data
+      ?.productType ||
     "PRODUCT"
   );
 }
@@ -546,37 +585,220 @@ export async function checkConnection() {
   try {
     checkRuntimeCredentials();
 
-    const result = await spApiCall(
-      "GET",
-      "/sellers/v1/marketplaceParticipations"
-    );
+    const result =
+      await spApiCall(
+        "GET",
+        "/sellers/v1/marketplaceParticipations"
+      );
 
     if (!result.ok) {
       return {
         success: false,
-        status: result.status,
-        error: amazonError(result)
+        status:
+          result.status,
+        error:
+          amazonError(result)
       };
     }
 
     return {
       success: true,
-      seller_id: getSellerId(),
+      seller_id:
+        getSellerId(),
       marketplace:
         getMarketplace(),
       participations:
-        result.data?.payload || []
+        result.data?.payload ||
+        []
     };
   } catch (error) {
     return {
       success: false,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
 
 export async function testConnection() {
   return checkConnection();
+}
+
+/* =========================================================
+   AMAZON CATALOG SEARCH
+========================================================= */
+
+export async function searchCatalogByIdentifier(
+  identifier,
+  identifierType = "UPC"
+) {
+  try {
+    checkRuntimeCredentials();
+
+    if (!identifier) {
+      return {
+        success: false,
+        error:
+          "Product identifier is required"
+      };
+    }
+
+    const normalizedIdentifier =
+      String(identifier)
+        .trim()
+        .replace(/\s+/g, "");
+
+    const normalizedType =
+      String(identifierType)
+        .trim()
+        .toUpperCase();
+
+    const allowedTypes =
+      new Set([
+        "ASIN",
+        "EAN",
+        "GTIN",
+        "ISBN",
+        "JAN",
+        "MINSAN",
+        "SKU",
+        "UPC"
+      ]);
+
+    if (
+      !allowedTypes.has(
+        normalizedType
+      )
+    ) {
+      return {
+        success: false,
+        error:
+          `Unsupported identifier type: ${normalizedType}`
+      };
+    }
+
+    const query = {
+      marketplaceIds:
+        getMarketplace(),
+      identifiers:
+        normalizedIdentifier,
+      identifiersType:
+        normalizedType,
+      includedData:
+        "summaries,identifiers,images,productTypes,classifications",
+      pageSize: 20
+    };
+
+    if (
+      normalizedType === "SKU"
+    ) {
+      query.sellerId =
+        getSellerId();
+    }
+
+    const result =
+      await spApiCall(
+        "GET",
+        "/catalog/2022-04-01/items",
+        query
+      );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        status:
+          result.status,
+        error:
+          amazonError(result),
+        data:
+          result.data
+      };
+    }
+
+    const items =
+      result.data?.items ||
+      [];
+
+    return {
+      success: true,
+      identifier:
+        normalizedIdentifier,
+      identifierType:
+        normalizedType,
+      marketplaceId:
+        getMarketplace(),
+      matchCount:
+        items.length,
+      pagination:
+        result.data?.pagination ||
+        null,
+      refinements:
+        result.data?.refinements ||
+        null,
+      matches:
+        items.map((item) => {
+          const summary =
+            item.summaries?.find(
+              (entry) =>
+                entry.marketplaceId ===
+                getMarketplace()
+            ) ||
+            item.summaries?.[0] ||
+            {};
+
+          const productType =
+            item.productTypes?.find(
+              (entry) =>
+                entry.marketplaceId ===
+                getMarketplace()
+            ) ||
+            item.productTypes?.[0] ||
+            {};
+
+          return {
+            asin:
+              item.asin ||
+              null,
+            title:
+              summary.itemName ||
+              null,
+            brand:
+              summary.brand ||
+              null,
+            manufacturer:
+              summary.manufacturer ||
+              null,
+            modelNumber:
+              summary.modelNumber ||
+              null,
+            color:
+              summary.color ||
+              null,
+            size:
+              summary.size ||
+              null,
+            productType:
+              productType.productType ||
+              null,
+            identifiers:
+              item.identifiers ||
+              [],
+            images:
+              item.images ||
+              [],
+            classifications:
+              item.classifications ||
+              []
+          };
+        })
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error:
+        error.message
+    };
+  }
 }
 
 /* =========================================================
@@ -588,6 +810,14 @@ export async function publishListing(
 ) {
   try {
     checkRuntimeCredentials();
+
+    if (!product) {
+      return {
+        success: false,
+        error:
+          "Product is required"
+      };
+    }
 
     const sellerId =
       getSellerId();
@@ -602,7 +832,9 @@ export async function publishListing(
       `/listings/2021-08-01/items/` +
       `${encodeURIComponent(
         sellerId
-      )}/${encodeURIComponent(sku)}`;
+      )}/${encodeURIComponent(
+        sku
+      )}`;
 
     const body =
       buildListingBody({
@@ -617,7 +849,8 @@ export async function publishListing(
         {
           marketplaceIds:
             getMarketplace(),
-          includedData: "issues"
+          includedData:
+            "issues"
         },
         body
       );
@@ -626,22 +859,28 @@ export async function publishListing(
       return {
         success: true,
         sku,
-        status: "SUBMITTED",
-        data: result.data
+        status:
+          "SUBMITTED",
+        data:
+          result.data
       };
     }
 
     return {
       success: false,
       sku,
-      status: result.status,
-      error: amazonError(result),
-      data: result.data
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -657,17 +896,29 @@ export async function syncInventory(
   try {
     checkRuntimeCredentials();
 
+    if (!sku) {
+      return {
+        success: false,
+        error:
+          "SKU is required"
+      };
+    }
+
     const sellerId =
       getSellerId();
 
     const productType =
-      await getExistingProductType(sku);
+      await getExistingProductType(
+        sku
+      );
 
     const path =
       `/listings/2021-08-01/items/` +
       `${encodeURIComponent(
         sellerId
-      )}/${encodeURIComponent(sku)}`;
+      )}/${encodeURIComponent(
+        sku
+      )}`;
 
     const body = {
       productType,
@@ -683,7 +934,9 @@ export async function syncInventory(
               quantity:
                 Math.max(
                   0,
-                  Number(quantity) || 0
+                  Number(
+                    quantity
+                  ) || 0
                 )
             }
           ]
@@ -698,7 +951,8 @@ export async function syncInventory(
         {
           marketplaceIds:
             getMarketplace(),
-          includedData: "issues"
+          includedData:
+            "issues"
         },
         body
       );
@@ -708,21 +962,27 @@ export async function syncInventory(
         success: true,
         sku,
         quantity,
-        data: result.data
+        data:
+          result.data
       };
     }
 
     return {
       success: false,
       sku,
-      status: result.status,
-      error: amazonError(result)
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
       sku,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -738,17 +998,29 @@ export async function syncPrice(
   try {
     checkRuntimeCredentials();
 
+    if (!sku) {
+      return {
+        success: false,
+        error:
+          "SKU is required"
+      };
+    }
+
     const sellerId =
       getSellerId();
 
     const productType =
-      await getExistingProductType(sku);
+      await getExistingProductType(
+        sku
+      );
 
     const path =
       `/listings/2021-08-01/items/` +
       `${encodeURIComponent(
         sellerId
-      )}/${encodeURIComponent(sku)}`;
+      )}/${encodeURIComponent(
+        sku
+      )}`;
 
     const body = {
       productType,
@@ -761,7 +1033,8 @@ export async function syncPrice(
             {
               marketplace_id:
                 getMarketplace(),
-              currency: "USD",
+              currency:
+                "USD",
               our_price: [
                 {
                   amount:
@@ -783,7 +1056,8 @@ export async function syncPrice(
         {
           marketplaceIds:
             getMarketplace(),
-          includedData: "issues"
+          includedData:
+            "issues"
         },
         body
       );
@@ -793,21 +1067,27 @@ export async function syncPrice(
         success: true,
         sku,
         price,
-        data: result.data
+        data:
+          result.data
       };
     }
 
     return {
       success: false,
       sku,
-      status: result.status,
-      error: amazonError(result)
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
       sku,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -822,6 +1102,14 @@ export async function getListingStatus(
   try {
     checkRuntimeCredentials();
 
+    if (!sku) {
+      return {
+        success: false,
+        error:
+          "SKU is required"
+      };
+    }
+
     const sellerId =
       getSellerId();
 
@@ -829,7 +1117,9 @@ export async function getListingStatus(
       `/listings/2021-08-01/items/` +
       `${encodeURIComponent(
         sellerId
-      )}/${encodeURIComponent(sku)}`;
+      )}/${encodeURIComponent(
+        sku
+      )}`;
 
     const result =
       await spApiCall(
@@ -847,21 +1137,27 @@ export async function getListingStatus(
       return {
         success: true,
         sku,
-        data: result.data
+        data:
+          result.data
       };
     }
 
     return {
       success: false,
       sku,
-      status: result.status,
-      error: amazonError(result)
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
       sku,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -901,22 +1197,29 @@ export async function getOrders(
         success: true,
         orders:
           result.data?.payload
-            ?.Orders || [],
+            ?.Orders ||
+          [],
         nextToken:
           result.data?.payload
-            ?.NextToken || null
+            ?.NextToken ||
+          null
       };
     }
 
     return {
       success: false,
-      status: result.status,
-      error: amazonError(result)
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -953,24 +1256,31 @@ export async function getOrderItems(
         orderId,
         orderItems:
           result.data?.payload
-            ?.OrderItems || [],
+            ?.OrderItems ||
+          [],
         nextToken:
           result.data?.payload
-            ?.NextToken || null
+            ?.NextToken ||
+          null
       };
     }
 
     return {
       success: false,
       orderId,
-      status: result.status,
-      error: amazonError(result)
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
       orderId,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -999,9 +1309,13 @@ export async function updateAmazonTracking(
     }
 
     const orderItemsResult =
-      await getOrderItems(orderId);
+      await getOrderItems(
+        orderId
+      );
 
-    if (!orderItemsResult.success) {
+    if (
+      !orderItemsResult.success
+    ) {
       return orderItemsResult;
     }
 
@@ -1025,14 +1339,18 @@ export async function updateAmazonTracking(
 
     const body = {
       packageDetail: {
-        packageReferenceId: "1",
+        packageReferenceId:
+          "1",
         carrierCode:
-          carrier || "UPS",
+          carrier ||
+          "UPS",
         shippingMethod:
-          carrier || "Standard",
+          carrier ||
+          "Standard",
         trackingNumber,
         shipDate:
-          new Date().toISOString(),
+          new Date()
+            .toISOString(),
         orderItems
       },
       marketplaceId:
@@ -1051,21 +1369,28 @@ export async function updateAmazonTracking(
       return {
         success: true,
         orderId,
-        trackingNumber
+        trackingNumber,
+        data:
+          result.data
       };
     }
 
     return {
       success: false,
       orderId,
-      status: result.status,
-      error: amazonError(result)
+      status:
+        result.status,
+      error:
+        amazonError(result),
+      data:
+        result.data
     };
   } catch (error) {
     return {
       success: false,
       orderId,
-      error: error.message
+      error:
+        error.message
     };
   }
 }
@@ -1079,7 +1404,8 @@ export function getAuthUrl(
   _redirectUri
 ) {
   const applicationId =
-    process.env.AMAZON_SPAPI_APP_ID;
+    process.env
+      .AMAZON_SPAPI_APP_ID;
 
   if (!applicationId) {
     throw new Error(
@@ -1109,7 +1435,9 @@ export function getAuthUrl(
       "beta"
   ).toLowerCase();
 
-  if (appVersion === "beta") {
+  if (
+    appVersion === "beta"
+  ) {
     params.set(
       "version",
       "beta"
@@ -1118,7 +1446,7 @@ export function getAuthUrl(
 
   return (
     `${sellerCentralUrl}` +
-    `/apps/authorize/consent?` +
+    "/apps/authorize/consent?" +
     params.toString()
   );
 }
@@ -1146,7 +1474,8 @@ export async function exchangeAuthCode(
       grant_type:
         "authorization_code",
       code,
-      redirect_uri: redirectUri,
+      redirect_uri:
+        redirectUri,
       client_id:
         process.env
           .AMAZON_LWA_CLIENT_ID,
@@ -1162,9 +1491,11 @@ export async function exchangeAuthCode(
       headers: {
         "Content-Type":
           "application/x-www-form-urlencoded;charset=UTF-8",
-        Accept: "application/json"
+        Accept:
+          "application/json"
       },
-      body: body.toString()
+      body:
+        body.toString()
     }
   );
 
@@ -1174,7 +1505,10 @@ export async function exchangeAuthCode(
   let data;
 
   try {
-    data = JSON.parse(responseText);
+    data =
+      JSON.parse(
+        responseText
+      );
   } catch {
     throw new Error(
       `Amazon token exchange returned invalid JSON: ${responseText}`
