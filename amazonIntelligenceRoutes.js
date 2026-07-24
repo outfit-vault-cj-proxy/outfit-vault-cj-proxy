@@ -556,7 +556,159 @@ export function createAmazonIntelligenceRouter(
 
      This route does not publish.
   ======================================================= */
+  /* =======================================================
+     START BEST TEST PRODUCT SCAN
 
+     Starts the analysis in the background and immediately
+     returns 202 so Cloudflare does not time out.
+  ======================================================= */
+
+  router.post(
+    "/start-best-test-product-scan",
+    requireAdmin,
+    async (req, res) => {
+      if (
+        intelligenceState.status ===
+        "RUNNING"
+      ) {
+        return res
+          .status(202)
+          .json({
+            success: true,
+            accepted: true,
+            status:
+              intelligenceState.status,
+            message:
+              "Amazon Intelligence analysis is already running.",
+            statusUrl:
+              "/amazon-intelligence/status",
+            reportUrl:
+              "/amazon-intelligence/report"
+          });
+      }
+
+      const options = {
+        delayMs:
+          normalizeNumber(
+            req.body?.delayMs,
+            250,
+            0,
+            60_000
+          ),
+
+        minimumScore:
+          normalizeNumber(
+            req.body?.minimumScore,
+            70,
+            0,
+            100
+          ),
+
+        checkPublished: true,
+
+        checkRestrictions: true,
+
+        costs:
+          Array.isArray(
+            req.body?.costs
+          )
+            ? req.body.costs
+            : [],
+
+        profitability:
+          req.body?.profitability ||
+          {}
+      };
+
+      intelligenceState.status =
+        "RUNNING";
+
+      intelligenceState.startedAt =
+        new Date()
+          .toISOString();
+
+      intelligenceState.completedAt =
+        null;
+
+      intelligenceState.error =
+        null;
+
+      intelligenceState.report =
+        null;
+
+      res
+        .status(202)
+        .json({
+          success: true,
+          accepted: true,
+          status: "RUNNING",
+          message:
+            "Amazon Intelligence analysis started in the background.",
+          statusUrl:
+            "/amazon-intelligence/status",
+          reportUrl:
+            "/amazon-intelligence/report"
+        });
+
+      void (
+        async () => {
+          try {
+            const loaded =
+              await loadVariants(
+                req
+              );
+
+            const variants =
+              loaded.variants;
+
+            if (
+              variants.length ===
+              0
+            ) {
+              throw new Error(
+                "No active Shopify variants were found."
+              );
+            }
+
+            const report =
+              await analyzeAmazonReadiness(
+                variants,
+                options
+              );
+
+            intelligenceState.report = {
+              ...report,
+
+              variantSource:
+                loaded.source,
+
+              receivedVariants:
+                variants.length
+            };
+
+            intelligenceState.status =
+              "COMPLETED";
+
+            intelligenceState.completedAt =
+              new Date()
+                .toISOString();
+          } catch (error) {
+            intelligenceState.status =
+              "FAILED";
+
+            intelligenceState.error =
+              error instanceof Error
+                ? error.message
+                : String(error);
+
+            intelligenceState.completedAt =
+              new Date()
+                .toISOString();
+          }
+        }
+      )();
+    }
+  );
   router.post(
     "/find-best-test-product",
     requireAdmin,
