@@ -4,6 +4,7 @@
 import express from "express";
 import cors from "cors";
 
+import createAmazonIntelligenceRouter from "./amazonIntelligenceRoutes.js";
 import createAmazonEngineRouter from "./amazonEngineRoutes.js";
 import * as shopifyVariantsModule from "./shopifyVariants.js";
 
@@ -50,6 +51,13 @@ app.use(express.urlencoded({ extended: false }));
 app.use(
   "/amazon-engine",
   createAmazonEngineRouter({
+    getShopifyVariants
+  })
+);
+
+app.use(
+  "/amazon-intelligence",
+  createAmazonIntelligenceRouter({
     getShopifyVariants
   })
 );
