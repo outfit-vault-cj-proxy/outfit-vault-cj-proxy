@@ -744,7 +744,8 @@ async function submitOfferOnlyListing(product, validationPreview) {
     issueLocale: "en_US"
   };
 
-  if (validationPreview) query.mode = "VALIDATION_PREVIEW";
+  if (validationPreview)
+     query.mode = "VALIDATION_PREVIEW";
 
   const body = buildOfferOnlyBody({
     ...product,
