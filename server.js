@@ -62,8 +62,44 @@ app.use(
   createAmazonIntelligenceRouter({
     getShopifyVariants
   })
-);
+app.use(
+  createAmazonMatchRouter({
+    searchCatalogItems,
+    loadShopifyProducts: async ({ limit, cursor, onlyErrored }) => {
+      // TODO: connect your Shopify loader here
+      return {
+        items: [],
+        nextCursor: null
+      };
+    },
+    saveMatchReview: async () => {},
+    getExistingMatchReview: async () => null,
+    updateBatchRun: async () => {},
+    logger: console,
+    authenticateAdmin: (req, res, next) => {
+      const expected = process.env.AMAZON_AUTH_SECRET;
+      const provided = req.headers["x-admin-key"];
 
+      if (!expected) {
+        return res.status(500).json({
+          success: false,
+          error: "AMAZON_AUTH_SECRET is not configured"
+        });
+      }
+
+      if (provided !== expected) {
+        return res.status(401).json({
+          success: false,
+          error: "Unauthorized"
+        });
+      }
+
+      next();
+    },
+    marketplaceId:
+      process.env.AMAZON_MARKETPLACE_ID || "ATVPDKIKX0DER"
+  })
+);  
 /* =========================================================
    CONFIGURATION
 ========================================================= */
