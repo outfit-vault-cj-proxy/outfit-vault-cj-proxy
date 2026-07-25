@@ -20,7 +20,6 @@ import {
   getOrders,
   getOrderItems,
   updateAmazonTracking,
-  updateAmazonTracking,
 searchCatalogByIdentifier,
 searchCatalogItems,
 getListingRestrictions,
@@ -1051,7 +1050,37 @@ app.get(
     }
   }
 );
+app.get(
+  "/amazon/catalog/items",
+  async (req, res) => {
+    try {
+      const adminKey = req.headers["x-admin-key"];
 
+      if (
+        process.env.AMAZON_AUTH_SECRET &&
+        adminKey !== process.env.AMAZON_AUTH_SECRET
+      ) {
+        return res.status(401).json({
+          success: false,
+          error: "Unauthorized"
+        });
+      }
+
+      const data = await searchCatalogItems({
+        identifiers: req.query.identifiers,
+        identifiersType: req.query.identifiersType,
+        keywords: req.query.keywords,
+        brandNames: req.query.brandNames
+      });
+
+      res
+        .status(responseStatus(data))
+        .json(data);
+    } catch (error) {
+      jsonError(res, 500, error);
+    }
+  }
+);
 app.get(
   "/amazon/offer/restrictions",
   async (req, res) => {
@@ -1950,9 +1979,11 @@ app.use((req, res) => {
       publishPage:
         "/amazon/publish-page",
       catalogSearch:
-        "/amazon/catalog/search?upc=889359349981",
-      offerPreview:
-        "/amazon/offer/preview?asin=B077SH7LZH&sku=AI7AR&price=86.95&quantity=1"
+  "/amazon/catalog/search?upc=889359349981",
+catalogItems:
+  "/amazon/catalog/items?keywords=dress",
+offerPreview:
+  "/amazon/offer/preview?asin=B077SH7LZH&sku=...",
     }
   });
 });
