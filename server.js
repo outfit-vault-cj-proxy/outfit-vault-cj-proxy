@@ -62,6 +62,7 @@ app.use(
   createAmazonIntelligenceRouter({
     getShopifyVariants
   })
+  );
 app.use(
   createAmazonMatchRouter({
     searchCatalogItems,
