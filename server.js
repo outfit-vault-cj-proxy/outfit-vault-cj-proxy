@@ -767,7 +767,171 @@ app.get(
     }
   }
 );
+/* =========================================
+   SHOPIFY SINGLE PRODUCT
+========================================= */
 
+app.get(
+  "/shopify/product",
+  async (req, res) => {
+    try {
+      const productId = String(
+        req.query.productId || ""
+      ).trim();
+
+      const handle = String(
+        req.query.handle || ""
+      ).trim();
+
+      if (!productId && !handle) {
+        return jsonError(
+          res,
+          400,
+          "productId or handle is required"
+        );
+      }
+
+      let data;
+
+      if (productId) {
+        const normalizedProductId =
+          productId.startsWith("gid://")
+            ? productId
+            : `gid://shopify/Product/${productId}`;
+
+        data = await shopifyGraphQL(
+          `
+            query ProductForAmazon($id: ID!) {
+              product(id: $id) {
+                id
+                legacyResourceId
+                title
+                handle
+                descriptionHtml
+                vendor
+                productType
+                status
+                featuredImage {
+                  url
+                  altText
+                }
+                images(first: 20) {
+                  nodes {
+                    url
+                    altText
+                  }
+                }
+                options {
+                  id
+                  name
+                  values
+                }
+                variants(first: 100) {
+                  nodes {
+                    id
+                    legacyResourceId
+                    title
+                    sku
+                    barcode
+                    price
+                    inventoryQuantity
+                    selectedOptions {
+                      name
+                      value
+                    }
+                    image {
+                      url
+                      altText
+                    }
+                  }
+                }
+              }
+            }
+          `,
+          {
+            id: normalizedProductId
+          }
+        );
+      } else {
+        data = await shopifyGraphQL(
+          `
+            query ProductForAmazonByHandle(
+              $handle: String!
+            ) {
+              productByHandle(handle: $handle) {
+                id
+                legacyResourceId
+                title
+                handle
+                descriptionHtml
+                vendor
+                productType
+                status
+                featuredImage {
+                  url
+                  altText
+                }
+                images(first: 20) {
+                  nodes {
+                    url
+                    altText
+                  }
+                }
+                options {
+                  id
+                  name
+                  values
+                }
+                variants(first: 100) {
+                  nodes {
+                    id
+                    legacyResourceId
+                    title
+                    sku
+                    barcode
+                    price
+                    inventoryQuantity
+                    selectedOptions {
+                      name
+                      value
+                    }
+                    image {
+                      url
+                      altText
+                    }
+                  }
+                }
+              }
+            }
+          `,
+          {
+            handle
+          }
+        );
+      }
+
+      const product =
+        data?.product ||
+        data?.productByHandle ||
+        null;
+
+      if (!product) {
+        return jsonError(
+          res,
+          404,
+          "Shopify product not found"
+        );
+      }
+
+      res.json({
+        success: true,
+        product
+      });
+    } catch (error) {
+      jsonError(res, 500, error);
+    }
+  }
+);
 /* =========================================================
    SHOPIFY IMPORT
 ========================================================= */
