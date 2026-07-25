@@ -751,11 +751,17 @@ async function submitOfferOnlyListing(product, validationPreview) {
   };
 
   if (validationPreview) query.mode = "VALIDATION_PREVIEW";
+const catalogResult = await searchCatalogByIdentifier(asin, "ASIN");
 
-  const body = buildOfferOnlyBody({
-    ...product,
-    asin
-  });
+const amazonProductType =
+  catalogResult.success
+    ? catalogResult.matches?.[0]?.productType
+    : null;
+const body = buildOfferOnlyBody({
+  ...product,
+  asin,
+  amazonProductType
+});
 
   const result = await spApiCall("PUT", path, query, body);
 
