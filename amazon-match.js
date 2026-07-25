@@ -1,3 +1,4 @@
+
 // amazon-match.js
 //
 // Portable Amazon Catalog Match Engine — pure, dependency-free matching logic.
@@ -77,20 +78,57 @@ export function extractAmazonIdentifiers(item) {
   const result = [];
 
   if (item?.asin) {
-    result.push({ type: "ASIN", value: normalizeIdentifier(item.asin) });
+    result.push({
+      type: "ASIN",
+      value: normalizeIdentifier(item.asin),
+    });
   }
 
-  for (const marketplaceGroup of item?.identifiers || []) {
-    for (const identifier of marketplaceGroup?.identifiers || []) {
-      const type = String(identifier?.identifierType || "").toUpperCase();
-      const value = normalizeIdentifier(identifier?.identifier);
-      if (value) {
-        result.push({
-          marketplaceId: marketplaceGroup?.marketplaceId || null,
-          type,
-          value,
-        });
+  const identifierGroups = Array.isArray(item?.identifiers)
+    ? item.identifiers
+    : [];
+
+  for (const entry of identifierGroups) {
+    // Raw SP-API shape:
+    // [{ marketplaceId, identifiers: [{ identifierType, identifier }] }]
+    if (Array.isArray(entry?.identifiers)) {
+      for (const identifier of entry.identifiers) {
+        const type = String(
+          identifier?.identifierType || identifier?.type || ""
+        ).toUpperCase();
+
+        const value = normalizeIdentifier(
+          identifier?.identifier || identifier?.value
+        );
+
+        if (value) {
+          result.push({
+            marketplaceId: entry?.marketplaceId || null,
+            type,
+            value,
+          });
+        }
       }
+
+      continue;
+    }
+
+    // Railway normalized shape:
+    // [{ type: "UPC", value: "889359349981" }]
+    const type = String(
+      entry?.type || entry?.identifierType || ""
+    ).toUpperCase();
+
+    const value = normalizeIdentifier(
+      entry?.value || entry?.identifier
+    );
+
+    if (value) {
+      result.push({
+        marketplaceId: entry?.marketplaceId || null,
+        type,
+        value,
+      });
     }
   }
 
@@ -99,11 +137,11 @@ export function extractAmazonIdentifiers(item) {
       entry.value &&
       array.findIndex(
         (candidate) =>
-          candidate.type === entry.type && candidate.value === entry.value
+          candidate.type === entry.type &&
+          candidate.value === entry.value
       ) === index
   );
 }
-
 
 export function extractAmazonTitle(item, marketplaceId) {
   const summaries = Array.isArray(item?.summaries) ? item.summaries : [];
