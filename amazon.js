@@ -687,12 +687,8 @@ function buildOfferOnlyBody(product = {}) {
     "new_new";
 
   return {
-    productType:
-  product.amazon_product_type ||
-  product.amazonProductType ||
-  product.product_type ||
-  product.productType ||
-  "PRODUCT",
+    // Amazon documents PRODUCT for offer-only listing submissions.
+    productType: "PRODUCT",
     requirements: "LISTING_OFFER_ONLY",
     attributes: {
       condition_type: [
@@ -717,7 +713,6 @@ function buildOfferOnlyBody(product = {}) {
         {
           audience: "ALL",
           currency: "USD",
-          marketplace_id: marketplaceId,
           our_price: [
             {
               schedule: [
@@ -751,17 +746,11 @@ async function submitOfferOnlyListing(product, validationPreview) {
   };
 
   if (validationPreview) query.mode = "VALIDATION_PREVIEW";
-const catalogResult = await searchCatalogByIdentifier(asin, "ASIN");
 
-const amazonProductType =
-  catalogResult.success
-    ? catalogResult.matches?.[0]?.productType
-    : null;
-const body = buildOfferOnlyBody({
-  ...product,
-  asin,
-  amazonProductType
-});
+  const body = buildOfferOnlyBody({
+    ...product,
+    asin
+  });
 
   const result = await spApiCall("PUT", path, query, body);
 
@@ -1225,7 +1214,6 @@ export async function syncPrice(sku, price) {
             {
               audience: "ALL",
               currency: "USD",
-              marketplace_id: getMarketplace(),
               our_price: [
                 {
                   schedule: [
