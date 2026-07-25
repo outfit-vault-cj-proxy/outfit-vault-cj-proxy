@@ -6,6 +6,7 @@ import cors from "cors";
 
 import createAmazonIntelligenceRouter from "./amazonIntelligenceRoutes.js";
 import createAmazonEngineRouter from "./amazonEngineRoutes.js";
+import { createAmazonMatchRouter } from "./amazon-match-routes.js";
 import * as shopifyVariantsModule from "./shopifyVariants.js";
 
 import {
