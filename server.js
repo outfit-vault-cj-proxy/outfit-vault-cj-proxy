@@ -20,8 +20,10 @@ import {
   getOrders,
   getOrderItems,
   updateAmazonTracking,
-  searchCatalogByIdentifier,
-  getListingRestrictions,
+  updateAmazonTracking,
+searchCatalogByIdentifier,
+searchCatalogItems,
+getListingRestrictions,
   previewOfferListing,
   createOfferListing
 } from "./amazon.js";
