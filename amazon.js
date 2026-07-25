@@ -741,7 +741,6 @@ async function submitOfferOnlyListing(product, validationPreview) {
 
   const query = {
     marketplaceIds: getMarketplace(),
-    includedData: "issues",
     issueLocale: "en_US"
   };
 
