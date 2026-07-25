@@ -186,7 +186,7 @@ return String(
   item?.amazon_product_type ||
   ""
 ).trim();
-
+}
 
 // ---------------------------------------------------------------------------
 // Apparel category normalization + conflict detection
