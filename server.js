@@ -65,13 +65,86 @@ app.use(
 app.use(
   createAmazonMatchRouter({
     searchCatalogItems,
-    loadShopifyProducts: async ({ limit, cursor, onlyErrored }) => {
-      // TODO: connect your Shopify loader here
-      return {
-        items: [],
-        nextCursor: null
-      };
-    },
+loadShopifyProducts: async ({
+  limit = 100,
+  cursor = null,
+  onlyErrored = false
+}) => {
+  const response = await getShopifyVariants();
+
+  if (!response?.success || !Array.isArray(response?.variants)) {
+    throw new Error(
+      "Unable to load Shopify variants for Amazon matching"
+    );
+  }
+
+  const productsById = new Map();
+
+  for (const variant of response.variants) {
+    const productId = String(
+      variant?.shopify_product_id || ""
+    ).trim();
+
+    if (!productId) continue;
+
+    if (!productsById.has(productId)) {
+      productsById.set(productId, {
+        id: productId,
+        title: variant?.productTitle || "",
+        vendor: variant?.vendor || "",
+        productType: variant?.productType || "",
+        featuredImage: variant?.image || null,
+        productStatus: variant?.productStatus || null,
+        variants: []
+      });
+    }
+
+    const product = productsById.get(productId);
+
+    product.variants.push({
+      id: variant?.shopify_variant_id || null,
+      sku: variant?.sku || null,
+      barcode: variant?.barcode || null,
+      price: Number(variant?.price || 0),
+      compareAtPrice:
+        variant?.compareAtPrice == null
+          ? null
+          : Number(variant.compareAtPrice),
+      inventoryQuantity:
+        Number(variant?.inventoryQuantity || 0),
+      selectedOptions:
+        Array.isArray(variant?.selectedOptions)
+          ? variant.selectedOptions
+          : [],
+      image: variant?.image || product.featuredImage,
+      weight: variant?.weight || null,
+      weightUnit: variant?.weightUnit || null
+    });
+  }
+
+  let products = Array.from(productsById.values());
+
+  // getShopifyVariants already retrieves all Shopify pages.
+  // Batch limiting is applied after variants are grouped by product.
+  const safeLimit = Math.max(
+    1,
+    Math.min(Number(limit) || 100, 500)
+  );
+
+  products = products.slice(0, safeLimit);
+
+  if (onlyErrored) {
+    console.warn(
+      "onlyErrored was requested, but no live match-history store is connected yet; scanning the selected Shopify products."
+    );
+  }
+
+  return {
+    items: products,
+    nextCursor: null,
+    sourceCursor: cursor
+  };
+},
     saveMatchReview: async () => {},
     getExistingMatchReview: async () => null,
     updateBatchRun: async () => {},
