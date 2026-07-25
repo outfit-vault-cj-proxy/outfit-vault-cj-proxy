@@ -143,19 +143,27 @@ export function extractAmazonIdentifiers(item) {
   );
 }
 
-export function extractAmazonTitle(item, marketplaceId) {
-  const summaries = Array.isArray(item?.summaries) ? item.summaries : [];
+export function extractAmazonTitle(item, marketplaceId = null) {
+  const summaries = Array.isArray(item?.summaries)
+    ? item.summaries
+    : [];
+
   const summary =
-    summaries.find((entry) => entry?.marketplaceId === marketplaceId) ||
+    summaries.find(
+      (entry) =>
+        !marketplaceId || entry?.marketplaceId === marketplaceId
+    ) ||
     summaries[0];
+
   return String(
     summary?.itemName ||
-      summary?.title ||
-      item?.attributes?.item_name?.[0]?.value ||
-      ""
+    summary?.title ||
+    item?.attributes?.item_name?.[0]?.value ||
+    item?.amazon_title ||
+    item?.title ||
+    ""
   ).trim();
 }
-
 export function extractAmazonBrand(item, marketplaceId) {
   const summaries = Array.isArray(item?.summaries) ? item.summaries : [];
   const summary =
@@ -171,12 +179,14 @@ export function extractAmazonProductType(item, marketplaceId) {
   const productType =
     productTypes.find((entry) => entry?.marketplaceId === marketplaceId) ||
     productTypes[0];
-  return String(
-    productType?.productType ||
-      item?.attributes?.product_type?.[0]?.value ||
-      ""
-  ).trim();
-}
+return String(
+  productType?.productType ||
+  item?.attributes?.product_type?.[0]?.value ||
+  item?.product_type ||
+  item?.amazon_product_type ||
+  ""
+).trim();
+
 
 // ---------------------------------------------------------------------------
 // Apparel category normalization + conflict detection
