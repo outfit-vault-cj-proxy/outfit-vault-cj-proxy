@@ -687,7 +687,12 @@ function buildOfferOnlyBody(product = {}) {
     "new_new";
 
   return {
-    productType: "PRODUCT",
+    productType:
+  product.amazon_product_type ||
+  product.amazonProductType ||
+  product.product_type ||
+  product.productType ||
+  "PRODUCT",
     requirements: "LISTING_OFFER_ONLY",
     attributes: {
       condition_type: [
