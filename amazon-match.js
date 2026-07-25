@@ -103,7 +103,7 @@ export function extractAmazonIdentifiers(item) {
       ) === index
   );
 }
-}
+
 
 export function extractAmazonTitle(item, marketplaceId) {
   const summaries = Array.isArray(item?.summaries) ? item.summaries : [];
