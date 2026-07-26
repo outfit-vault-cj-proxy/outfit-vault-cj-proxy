@@ -1458,17 +1458,19 @@ app.post(
 app.post(
   "/amazon/offer/create",
   async (req, res) => {
-    try {
-      const product =
-        req.body?.product ||
-        req.body;
+    const product =
+      req.body?.product ||
+      req.body;
 
+    try {
       if (!product?.asin) {
-        return jsonError(
-          res,
-          400,
-          "Product with asin is required"
-        );
+        return res.status(400).json({
+          success: false,
+          stage: "INVALID",
+          error: "Product with asin is required",
+          endpoint: "/amazon/offer/create",
+          receivedBody: req.body || null
+        });
       }
 
       if (
@@ -1476,11 +1478,14 @@ app.post(
         !product.amazon_sku &&
         !product.shopify_variant_id
       ) {
-        return jsonError(
-          res,
-          400,
-          "Product SKU or Shopify variant ID is required"
-        );
+        return res.status(400).json({
+          success: false,
+          stage: "INVALID",
+          error:
+            "Product SKU or Shopify variant ID is required",
+          endpoint: "/amazon/offer/create",
+          receivedProduct: product
+        });
       }
 
       if (
@@ -1488,11 +1493,13 @@ app.post(
         product.price === null ||
         product.price === ""
       ) {
-        return jsonError(
-          res,
-          400,
-          "Product price is required"
-        );
+        return res.status(400).json({
+          success: false,
+          stage: "INVALID",
+          error: "Product price is required",
+          endpoint: "/amazon/offer/create",
+          receivedProduct: product
+        });
       }
 
       const data =
@@ -1500,11 +1507,63 @@ app.post(
           product
         );
 
-      res
-        .status(responseStatus(data))
-        .json(data);
+      return res
+        .status(
+          data?.success
+            ? 200
+            : Number.isInteger(data?.status)
+              ? data.status
+              : 422
+        )
+        .json({
+          ...data,
+          endpoint:
+            "/amazon/offer/create",
+          receivedProduct: product
+        });
     } catch (error) {
-      jsonError(res, 500, error);
+      return res.status(500).json({
+        success: false,
+        stage: "SERVER_ERROR",
+        endpoint:
+          "/amazon/offer/create",
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+        stack:
+          error instanceof Error
+            ? error.stack
+            : null,
+        receivedProduct: product,
+        environment: {
+          marketplaceConfigured:
+            Boolean(
+              process.env
+                .AMAZON_MARKETPLACE_ID
+            ),
+          sellerConfigured:
+            Boolean(
+              process.env
+                .AMAZON_SELLER_ID
+            ),
+          lwaClientConfigured:
+            Boolean(
+              process.env
+                .AMAZON_LWA_CLIENT_ID
+            ),
+          lwaSecretConfigured:
+            Boolean(
+              process.env
+                .AMAZON_LWA_CLIENT_SECRET
+            ),
+          refreshTokenConfigured:
+            Boolean(
+              process.env
+                .AMAZON_LWA_REFRESH_TOKEN
+            )
+        }
+      });
     }
   }
 );
