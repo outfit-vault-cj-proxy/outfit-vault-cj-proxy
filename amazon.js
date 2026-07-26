@@ -932,6 +932,192 @@ function normalizeImages(product = {}) {
   return [];
 }
 
+
+function isBlankAmazonAttribute(value) {
+  return (
+    value === undefined ||
+    value === null ||
+    value === "" ||
+    (Array.isArray(value) && value.length === 0)
+  );
+}
+
+function inferExternalIdentifierType(value) {
+  const normalized = String(value || "").replace(/\D/g, "");
+
+  if (normalized.length === 12) return "upc";
+  if (normalized.length === 13) return "ean";
+  if (normalized.length === 14) return "gtin";
+
+  return "upc";
+}
+
+function normalizeCustomAmazonAttributes(customAttributes, marketplaceId) {
+  if (!customAttributes || typeof customAttributes !== "object") {
+    return {};
+  }
+
+  const textAttributes = new Set([
+    "product_description",
+    "fabric_type",
+    "care_instructions",
+    "color",
+    "age_range_description",
+    "department",
+    "model_name",
+    "style"
+  ]);
+
+  const controlledAttributes = new Set([
+    "merchant_suggested_asin",
+    "rise",
+    "closure",
+    "target_gender",
+    "import_designation",
+    "country_of_origin"
+  ]);
+
+  const normalized = {};
+
+  for (const [name, rawValue] of Object.entries(customAttributes)) {
+    if (isBlankAmazonAttribute(rawValue)) continue;
+
+    // Preserve already-structured SP-API attribute arrays.
+    if (
+      Array.isArray(rawValue) &&
+      rawValue.length > 0 &&
+      rawValue.every(
+        (entry) =>
+          entry &&
+          typeof entry === "object" &&
+          !Array.isArray(entry)
+      )
+    ) {
+      normalized[name] = rawValue;
+      continue;
+    }
+
+    if (name === "bullet_point") {
+      const bulletValues = Array.isArray(rawValue)
+        ? rawValue
+        : String(rawValue)
+            .split(/\r?\n/)
+            .map((value) => value.trim())
+            .filter(Boolean);
+
+      normalized.bullet_point = bulletValues.map((value) => ({
+        value: String(value),
+        marketplace_id: marketplaceId,
+        language_tag: "en_US"
+      }));
+      continue;
+    }
+
+    if (name === "list_price") {
+      const amount =
+        typeof rawValue === "object"
+          ? Number(
+              rawValue.amount ??
+                rawValue.value_with_tax ??
+                rawValue.value
+            )
+          : Number(rawValue);
+
+      if (Number.isFinite(amount) && amount > 0) {
+        normalized.list_price = [
+          {
+            currency:
+              (typeof rawValue === "object" && rawValue.currency) ||
+              "USD",
+            value_with_tax: Number(amount.toFixed(2)),
+            marketplace_id: marketplaceId
+          }
+        ];
+      }
+      continue;
+    }
+
+    if (name === "externally_assigned_product_identifier") {
+      const identifierValue =
+        typeof rawValue === "object"
+          ? rawValue.value ?? rawValue.identifier
+          : rawValue;
+
+      if (!isBlankAmazonAttribute(identifierValue)) {
+        normalized.externally_assigned_product_identifier = [
+          {
+            type:
+              (typeof rawValue === "object" &&
+                (rawValue.type || rawValue.identifierType)) ||
+              inferExternalIdentifierType(identifierValue),
+            value: String(identifierValue).trim(),
+            marketplace_id: marketplaceId
+          }
+        ];
+      }
+      continue;
+    }
+
+    if (name === "bottoms_size") {
+      if (typeof rawValue === "object" && !Array.isArray(rawValue)) {
+        normalized.bottoms_size = [
+          {
+            ...rawValue,
+            marketplace_id:
+              rawValue.marketplace_id || marketplaceId
+          }
+        ];
+      } else {
+        normalized.bottoms_size = [
+          {
+            size: String(rawValue).trim(),
+            size_system: "US",
+            size_class: "numeric",
+            marketplace_id: marketplaceId
+          }
+        ];
+      }
+      continue;
+    }
+
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+
+    if (textAttributes.has(name)) {
+      normalized[name] = values
+        .filter((value) => !isBlankAmazonAttribute(value))
+        .map((value) => ({
+          value: String(value),
+          marketplace_id: marketplaceId,
+          language_tag: "en_US"
+        }));
+      continue;
+    }
+
+    if (controlledAttributes.has(name)) {
+      normalized[name] = values
+        .filter((value) => !isBlankAmazonAttribute(value))
+        .map((value) => ({
+          value: String(value),
+          marketplace_id: marketplaceId
+        }));
+      continue;
+    }
+
+    // Generic fallback for any additional attributes added later.
+    normalized[name] = values
+      .filter((value) => !isBlankAmazonAttribute(value))
+      .map((value) => ({
+        value:
+          typeof value === "object"
+            ? value.value ?? value
+            : value,
+        marketplace_id: marketplaceId
+      }));
+  }
+
+  return normalized;
+}
+
 function buildListingBody(product = {}) {
   const marketplaceId = getMarketplace();
 
@@ -1006,6 +1192,13 @@ function buildListingBody(product = {}) {
       }
     ];
   }
+
+  const customAttributes = normalizeCustomAmazonAttributes(
+    product.attributes,
+    marketplaceId
+  );
+
+  Object.assign(attributes, customAttributes);
 
   return {
     productType: mapProductType(product),
@@ -1477,4 +1670,3 @@ export async function exchangeAuthCode(code, redirectUri) {
   }
 
   return data;
-}
