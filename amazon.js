@@ -1670,3 +1670,4 @@ export async function exchangeAuthCode(code, redirectUri) {
   }
 
   return data;
+}
