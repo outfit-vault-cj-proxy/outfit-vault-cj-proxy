@@ -1293,6 +1293,74 @@ function isValidGtinCheckDigit(value) {
 
   return suppliedCheckDigit === calculatedCheckDigit;
 }
+async function resolveVerifiedAmazonMatch(product, suppliedMatchResolution = null) {
+  const asin = String(
+    product?.asin ||
+    product?.amazon_asin ||
+    ""
+  )
+    .trim()
+    .toUpperCase();
+
+  if (!asin) {
+    return suppliedMatchResolution;
+  }
+
+  if (
+    suppliedMatchResolution?.decision === "AUTO_MATCH" &&
+    String(
+      suppliedMatchResolution?.bestMatch?.asin ||
+      ""
+    )
+      .trim()
+      .toUpperCase() === asin
+  ) {
+    return suppliedMatchResolution;
+  }
+
+  const catalogData =
+    await searchCatalogByIdentifier(
+      asin,
+      "ASIN"
+    );
+
+  if (
+    !catalogData?.success ||
+    !Array.isArray(catalogData?.matches)
+  ) {
+    return {
+      decision: "NO_SAFE_MATCH",
+      bestMatch: null,
+      alternatives: [],
+      reason: "ASIN_LOOKUP_FAILED",
+      catalogData
+    };
+  }
+
+  return chooseBestAmazonMatch(
+    {
+      identifier: asin,
+      identifierType: "ASIN",
+      title: product?.title || "",
+      brand:
+        product?.brand ||
+        product?.vendor ||
+        "",
+      productType:
+        product?.productType ||
+        product?.product_type ||
+        "",
+      color: product?.color || "",
+      size: product?.size || "",
+      modelNumber:
+        product?.modelNumber ||
+        product?.model_number ||
+        ""
+    },
+    catalogData.matches
+  );
+}
+
 /* =========================================================
    AMAZON CATALOG AND OFFERS
 ========================================================= */
@@ -1756,6 +1824,55 @@ app.post(
         });
       }
 
+      const matchResolution =
+        await resolveVerifiedAmazonMatch(
+          product,
+          req.body?.matchResolution ||
+            product?.matchResolution ||
+            null
+        );
+
+      if (
+        !matchResolution ||
+        matchResolution.decision !== "AUTO_MATCH" ||
+        !matchResolution.bestMatch?.asin
+      ) {
+        return res.status(409).json({
+          success: false,
+          stage: "MATCH_SAFETY_BLOCK",
+          error:
+            "Amazon offer creation blocked because the ASIN could not be verified as a safe catalog match.",
+          endpoint: "/amazon/offer/create",
+          matchResolution,
+          receivedProduct: product
+        });
+      }
+
+      const submittedAsin = String(product.asin)
+        .trim()
+        .toUpperCase();
+
+      const approvedAsin = String(
+        matchResolution.bestMatch.asin
+      )
+        .trim()
+        .toUpperCase();
+
+      if (submittedAsin !== approvedAsin) {
+        return res.status(409).json({
+          success: false,
+          stage: "ASIN_MISMATCH",
+          error:
+            "The requested ASIN does not match the approved Amazon candidate.",
+          endpoint: "/amazon/offer/create",
+          submittedAsin,
+          approvedAsin,
+          matchResolution
+        });
+      }
+
+      product.asin = approvedAsin;
+
       const data =
         await createOfferListing(
           product
@@ -1773,6 +1890,7 @@ app.post(
           ...data,
           endpoint:
             "/amazon/offer/create",
+          matchResolution,
           receivedProduct: product
         });
     } catch (error) {
@@ -2302,12 +2420,71 @@ app.post(
         );
       }
 
+      let matchResolution =
+        req.body?.matchResolution ||
+        product?.matchResolution ||
+        null;
+
+      // Existing-ASIN listings must be verified before publishing.
+      // New catalog listings without an ASIN continue through the
+      // normal GTIN or GTIN-exemption workflow in publishListing().
+      if (product?.asin) {
+        matchResolution =
+          await resolveVerifiedAmazonMatch(
+            product,
+            matchResolution
+          );
+
+        if (
+          !matchResolution ||
+          matchResolution.decision !== "AUTO_MATCH" ||
+          !matchResolution.bestMatch?.asin
+        ) {
+          return res.status(409).json({
+            success: false,
+            stage: "MATCH_SAFETY_BLOCK",
+            error:
+              "Existing-ASIN publishing requires a verified AUTO_MATCH decision.",
+            matchResolution
+          });
+        }
+
+        const submittedAsin = String(product.asin)
+          .trim()
+          .toUpperCase();
+
+        const approvedAsin = String(
+          matchResolution.bestMatch.asin
+        )
+          .trim()
+          .toUpperCase();
+
+        if (submittedAsin !== approvedAsin) {
+          return res.status(409).json({
+            success: false,
+            stage: "ASIN_MISMATCH",
+            error:
+              "The submitted ASIN does not match the approved Amazon candidate.",
+            submittedAsin,
+            approvedAsin,
+            matchResolution
+          });
+        }
+
+        product.asin = approvedAsin;
+      }
+
       const data =
         await publishListing(product);
 
       res
         .status(responseStatus(data))
-        .json(data);
+        .json({
+          ...data,
+          ...(matchResolution
+            ? { matchResolution }
+            : {})
+        });
     } catch (error) {
       jsonError(res, 500, error);
     }
