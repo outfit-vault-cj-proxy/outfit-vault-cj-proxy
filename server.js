@@ -1268,7 +1268,31 @@ app.get(
     }
   }
 );
+function isValidGtinCheckDigit(value) {
+  const digits = String(value)
+    .replace(/[\s-]/g, "")
+    .split("")
+    .map(Number);
 
+  if (
+    digits.length < 2 ||
+    digits.some((digit) => Number.isNaN(digit))
+  ) {
+    return false;
+  }
+
+  const suppliedCheckDigit = digits.pop();
+
+  const sum = digits
+    .reverse()
+    .reduce((total, digit, index) => {
+      return total + digit * (index % 2 === 0 ? 3 : 1);
+    }, 0);
+
+  const calculatedCheckDigit = (10 - (sum % 10)) % 10;
+
+  return suppliedCheckDigit === calculatedCheckDigit;
+}
 /* =========================================================
    AMAZON CATALOG AND OFFERS
 ========================================================= */
@@ -1277,49 +1301,208 @@ app.get(
   "/amazon/catalog/search",
   async (req, res) => {
     try {
-      const identifier =
-        req.query.identifier ||
-        req.query.upc ||
-        req.query.ean ||
-        req.query.gtin ||
-        req.query.asin ||
-        req.query.sku;
-
-      let identifierType =
+      const queryIdentifierType = String(
         req.query.identifierType ||
-        req.query.type;
+        req.query.identifiersType ||
+        req.query.type ||
+        ""
+      )
+        .trim()
+        .toUpperCase();
 
-      if (!identifierType) {
-        if (req.query.asin) {
-          identifierType = "ASIN";
-        } else if (req.query.sku) {
-          identifierType = "SKU";
-        } else if (req.query.ean) {
-          identifierType = "EAN";
-        } else if (req.query.gtin) {
-          identifierType = "GTIN";
-        } else {
-          identifierType = "UPC";
-        }
+      const identifierEntries = [
+        ["ASIN", req.query.asin],
+        ["UPC", req.query.upc],
+        ["EAN", req.query.ean],
+        ["JAN", req.query.jan],
+        ["ISBN", req.query.isbn],
+        ["GTIN", req.query.gtin],
+        ["GTIN", req.query.gtin14],
+        ["SKU", req.query.sku],
+        [queryIdentifierType, req.query.identifier]
+      ];
+
+      const selectedEntry = identifierEntries.find(
+        ([type, value]) =>
+          type &&
+          value !== undefined &&
+          value !== null &&
+          String(value).trim() !== ""
+      );
+
+      if (!selectedEntry) {
+        return jsonError(
+          res,
+          400,
+          "A product identifier is required. Provide asin, upc, ean, jan, isbn, gtin, gtin14, sku, or identifier."
+        );
+      }
+
+      let [identifierType, rawIdentifier] = selectedEntry;
+
+      identifierType = String(identifierType)
+        .trim()
+        .toUpperCase();
+
+      let identifier = String(rawIdentifier).trim();
+
+      const allowedIdentifierTypes = new Set([
+        "ASIN",
+        "UPC",
+        "EAN",
+        "JAN",
+        "ISBN",
+        "GTIN",
+        "SKU"
+      ]);
+
+      if (!allowedIdentifierTypes.has(identifierType)) {
+        return jsonError(
+          res,
+          400,
+          `Unsupported identifier type: ${identifierType}`
+        );
+      }
+
+      // Normalize barcode-based identifiers.
+      if (
+        ["UPC", "EAN", "JAN", "ISBN", "GTIN"].includes(
+          identifierType
+        )
+      ) {
+        identifier = identifier.replace(/[\s-]/g, "");
+      }
+
+      // Normalize ASIN without changing seller SKUs.
+      if (identifierType === "ASIN") {
+        identifier = identifier
+          .replace(/\s/g, "")
+          .toUpperCase();
       }
 
       if (!identifier) {
         return jsonError(
           res,
           400,
-          "identifier is required"
+          "The product identifier cannot be empty."
         );
       }
 
-      const data =
-        await searchCatalogByIdentifier(
-          identifier,
-          identifierType
+      // Validate ASIN.
+      if (
+        identifierType === "ASIN" &&
+        !/^[A-Z0-9]{10}$/.test(identifier)
+      ) {
+        return jsonError(
+          res,
+          400,
+          "Invalid ASIN. An ASIN must contain exactly 10 letters or numbers."
         );
+      }
 
-      res
+      // Validate expected numeric lengths.
+      const validLengths = {
+        UPC: [12],
+        EAN: [13],
+        JAN: [13],
+        ISBN: [10, 13],
+        GTIN: [8, 12, 13, 14]
+      };
+
+      if (validLengths[identifierType]) {
+        if (!/^\d+$/.test(identifier)) {
+          return jsonError(
+            res,
+            400,
+            `${identifierType} must contain numbers only.`
+          );
+        }
+
+        if (
+          !validLengths[identifierType].includes(
+            identifier.length
+          )
+        ) {
+          return jsonError(
+            res,
+            400,
+            `Invalid ${identifierType} length. Expected ${validLengths[
+              identifierType
+            ].join(" or ")} digits.`
+          );
+        }
+      }
+
+      // JAN is part of the EAN-13 system and normally begins with 45 or 49.
+      if (
+        identifierType === "JAN" &&
+        !/^(45|49)/.test(identifier)
+      ) {
+        return jsonError(
+          res,
+          400,
+          "Invalid JAN. A JAN is normally a 13-digit identifier beginning with 45 or 49."
+        );
+      }
+
+      // Validate GS1 check digit for numeric identifiers except ISBN-10.
+      const shouldValidateCheckDigit =
+        ["UPC", "EAN", "JAN", "GTIN"].includes(
+          identifierType
+        ) ||
+        (identifierType === "ISBN" &&
+          identifier.length === 13);
+
+      if (
+        shouldValidateCheckDigit &&
+        !isValidGtinCheckDigit(identifier)
+      ) {
+        return jsonError(
+          res,
+          400,
+          `Invalid ${identifierType} check digit.`
+        );
+      }
+
+      const amazonIdentifierType =
+  identifierType === "JAN"
+    ? "EAN"
+    : identifierType === "GTIN"
+      ? (
+          identifier.length === 12
+            ? "UPC"
+            : identifier.length === 13
+              ? "EAN"
+              : identifier.length === 10
+                ? "ISBN"
+                : null
+        )
+      : identifierType;
+
+if (!amazonIdentifierType) {
+  return jsonError(
+    res,
+    400,
+    `${identifierType}-${identifier.length} is valid as a barcode format, but this Amazon catalog route cannot search that format directly.`
+  );
+}
+
+const data = await searchCatalogByIdentifier(
+  identifier,
+  amazonIdentifierType
+);
+
+      return res
         .status(responseStatus(data))
-        .json(data);
+        .json({
+          ...data,
+          searchMetadata: {
+  identifier,
+  submittedIdentifierType: identifierType,
+  amazonIdentifierType,
+  searchedAt: new Date().toISOString()
+}
+        });
     } catch (error) {
       jsonError(res, 500, error);
     }
