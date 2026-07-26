@@ -3,7 +3,7 @@
 
 import express from "express";
 import cors from "cors";
-
+import { chooseBestAmazonMatch } from "./amazonMatcher.js";
 import createAmazonIntelligenceRouter from "./amazonIntelligenceRoutes.js";
 import createAmazonEngineRouter from "./amazonEngineRoutes.js";
 import { createAmazonMatchRouter } from "./amazon-match-routes.js";
@@ -1491,11 +1491,26 @@ const data = await searchCatalogByIdentifier(
   identifier,
   amazonIdentifierType
 );
+      const sourceProduct = {
+  identifier,
+  identifierType,
+  title: req.query.title || "",
+  brand: req.query.brand || "",
+  productType: req.query.productType || "",
+  color: req.query.color || "",
+  size: req.query.size || "",
+  modelNumber: req.query.modelNumber || ""
+};
 
-      return res
-        .status(responseStatus(data))
+const matchResolution = chooseBestAmazonMatch(
+  sourceProduct,
+  Array.isArray(data?.matches) ? data.matches : []
+);
+return res
+  .status(responseStatus(data))
         .json({
           ...data,
+          matchResolution,
           searchMetadata: {
   identifier,
   submittedIdentifierType: identifierType,
@@ -1503,6 +1518,7 @@ const data = await searchCatalogByIdentifier(
   searchedAt: new Date().toISOString()
 }
         });
+      
     } catch (error) {
       jsonError(res, 500, error);
     }
