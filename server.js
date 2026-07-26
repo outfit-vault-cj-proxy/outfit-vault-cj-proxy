@@ -1454,7 +1454,62 @@ app.post(
     }
   }
 );
+app.post("/amazon/eligibility/check", async (req, res) => {
+  const product = req.body?.product || req.body || {};
 
+  const asin = product.asin || product.amazon_asin;
+  const conditionType =
+    product.condition_type ||
+    product.conditionType ||
+    "new_new";
+
+  if (!asin) {
+    return res.status(400).json({
+      success: false,
+      stage: "INVALID",
+      eligible: false,
+      error: "Product ASIN is required",
+      endpoint: "/amazon/eligibility/check",
+      receivedBody: req.body || null
+    });
+  }
+
+  try {
+    const data = await getListingRestrictions(
+      asin,
+      conditionType
+    );
+
+    return res
+      .status(
+        data?.success
+          ? 200
+          : Number.isInteger(data?.status)
+            ? data.status
+            : 502
+      )
+      .json({
+        ...data,
+        stage: data?.success
+          ? data?.eligible
+            ? "ELIGIBLE"
+            : "RESTRICTED"
+          : "RESTRICTIONS_CHECK",
+        endpoint: "/amazon/eligibility/check"
+      });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      stage: "RESTRICTIONS_CHECK",
+      eligible: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error),
+      endpoint: "/amazon/eligibility/check"
+    });
+  }
+});
 app.post(
   "/amazon/offer/create",
   async (req, res) => {
