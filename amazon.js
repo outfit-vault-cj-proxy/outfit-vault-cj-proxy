@@ -810,6 +810,8 @@ export async function createOfferListing(product) {
     if (!product) {
       return {
         success: false,
+        stage: "INVALID",
+        status: 400,
         error: "Product is required"
       };
     }
@@ -827,6 +829,10 @@ export async function createOfferListing(product) {
       return {
         success: false,
         stage: "RESTRICTIONS_CHECK",
+        status: restrictions.status || 502,
+        error:
+          restrictions.error ||
+          "Amazon restrictions check failed",
         restrictions
       };
     }
@@ -835,8 +841,9 @@ export async function createOfferListing(product) {
       return {
         success: false,
         stage: "RESTRICTED",
+        status: 403,
         asin,
-        message:
+        error:
           "Amazon requires approval or additional action before this ASIN can be listed.",
         restrictions: restrictions.restrictions
       };
@@ -848,16 +855,43 @@ export async function createOfferListing(product) {
       return {
         success: false,
         stage: "VALIDATION_PREVIEW",
+        status: preview.status || 422,
         asin,
+        error:
+          preview.error ||
+          "Amazon validation preview failed",
+        issues:
+          preview.issues ||
+          preview.data?.issues ||
+          [],
         preview
       };
     }
 
-    const submission = await submitOfferOnlyListing(product, false);
+    const submission =
+      await submitOfferOnlyListing(
+        product,
+        false
+      );
+
+    if (!submission.success) {
+      return {
+        ...submission,
+        success: false,
+        stage: "SUBMISSION_FAILED",
+        status: submission.status || 422,
+        error:
+          submission.error ||
+          "Amazon offer submission failed",
+        restrictions,
+        preview
+      };
+    }
 
     return {
       ...submission,
-      stage: submission.success ? "SUBMITTED" : "SUBMISSION_FAILED",
+      success: true,
+      stage: "SUBMITTED",
       restrictions,
       preview
     };
@@ -865,7 +899,15 @@ export async function createOfferListing(product) {
     return {
       success: false,
       stage: "ERROR",
-      error: error.message
+      status: 500,
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error),
+      stack:
+        error instanceof Error
+          ? error.stack
+          : null
     };
   }
 }
