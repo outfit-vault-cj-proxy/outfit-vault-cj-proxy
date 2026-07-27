@@ -32,6 +32,9 @@ import {
   MATCH_STATUSES,
 } from "./amazon-match.js";
 
+const ROUTER_VERSION = "amazon-match-routes-v2";
+const DEFAULT_MINIMUM_READY_SCORE = 85;
+
 const DEFAULT_INCLUDED_DATA = [
   "attributes",
   "identifiers",
@@ -65,7 +68,7 @@ function requireAdmin(deps) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /amazon/catalog/items  — identifier OR keyword search (never both)
+// GET /amazon/catalog/items  â identifier OR keyword search (never both)
 // ---------------------------------------------------------------------------
 
 export function createCatalogSearchHandler(deps) {
@@ -121,7 +124,7 @@ export function createCatalogSearchHandler(deps) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /amazon/match-product  — score one product against Amazon catalog
+// POST /amazon/match-product  â score one product against Amazon catalog
 // ---------------------------------------------------------------------------
 
 export function createProductMatchHandler(deps) {
@@ -188,10 +191,12 @@ export function createProductMatchHandler(deps) {
       const scoredMatches = uniqueItems.map((item) =>
         scoreAmazonCandidate({ product, item, marketplaceId, inputIdentifiers: identifiers })
       );
-      const bestMatch = chooseBestAmazonMatch(scoredMatches);
+      const decision = chooseBestAmazonMatch(scoredMatches,{minimumAutoMatchConfidence:95,minimumReviewConfidence:75});
+      const bestMatch = decision.bestMatch;
 
       return res.json({
         success: true,
+        version: ROUTER_VERSION,
         product: {
           id: product?.id || null,
           handle: product?.handle || null,
@@ -202,7 +207,8 @@ export function createProductMatchHandler(deps) {
           variants,
         },
         identifiers,
-        status: bestMatch?.status || "NO_SAFE_MATCH",
+        status: decision.decision,
+        readiness: bestMatch?.confidence >= DEFAULT_MINIMUM_READY_SCORE ? "AMAZON_READY":"NOT_AMAZON_READY",
         bestMatch,
         matches: scoredMatches.sort((a, b) => b.confidence - a.confidence).slice(0, 10),
       });
@@ -213,7 +219,7 @@ export function createProductMatchHandler(deps) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /admin/amazon/rematch-all  — batch rescan with dry-run support
+// POST /admin/amazon/rematch-all  â batch rescan with dry-run support
 // ---------------------------------------------------------------------------
 
 function sleep(ms) {
@@ -373,6 +379,7 @@ export function createRematchAllHandler(deps) {
 
       return res.json({
         success: true,
+        version: ROUTER_VERSION,
         runId,
         dryRun,
         ...counts,
