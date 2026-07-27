@@ -24,7 +24,7 @@ import {
 ========================================================= */
 
 const ENGINE_VERSION =
-  "amazon-engine-v3.1-compliance";
+  "amazon-engine-v3.2-runtime-safe";
 
 const DEFAULT_MINIMUM_READY_SCORE = 85;
 
@@ -405,7 +405,9 @@ function createBaseResult(
       matchMethod: null,
       evidenceLevel: "NONE",
       identifierProvenance: null,
-      requiresManualReview: false
+      requiresManualReview: false,
+      warnings: [],
+      lastSearchError: null
     },
 
     issues: [],
@@ -819,6 +821,62 @@ function buildAutoFixActions(
   return actions;
 }
 
+
+function getErrorMessage(error, fallback = "Unknown Amazon service error") {
+  if (!error) return fallback;
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return (
+    error.message ||
+    error.error ||
+    error.details ||
+    fallback
+  );
+}
+
+function addAmazonWarning(
+  result,
+  code,
+  message,
+  severity = "REVIEW"
+) {
+  const cleanMessage =
+    cleanText(message) ||
+    "Amazon service did not return a usable response.";
+
+  result.amazon.warnings =
+    Array.isArray(result.amazon.warnings)
+      ? result.amazon.warnings
+      : [];
+
+  result.amazon.warnings.push({
+    code,
+    message: cleanMessage
+  });
+
+  result.amazon.lastSearchError =
+    cleanMessage;
+
+  if (
+    !result.issues.some(
+      (issue) =>
+        issue.code === code &&
+        issue.message === cleanMessage
+    )
+  ) {
+    result.issues.push({
+      code,
+      severity,
+      message: cleanMessage
+    });
+  }
+
+  return result;
+}
+
 /* =========================================================
    FINAL STATUS CLASSIFICATION
 ========================================================= */
@@ -833,7 +891,7 @@ function classifyResult(
       "FAILED";
 
     result.recommendation =
-      "Review the scan error and retry.";
+      `Scan failed: ${result.error}`;
 
     return result;
   }
@@ -914,6 +972,50 @@ function classifyResult(
   if (
     hasIssue(
       result,
+      "AMAZON_SCAN_WARNING"
+    )
+  ) {
+    result.status =
+      "NEEDS_REVIEW";
+
+    result.recommendation =
+      result.amazon.lastSearchError
+        ? `Amazon scan needs review: ${result.amazon.lastSearchError}`
+        : "Amazon scan needs review.";
+
+    return result;
+  }
+
+  if (
+    hasIssue(
+      result,
+      "AMAZON_IDENTIFIER_SEARCH_UNAVAILABLE"
+    ) ||
+    hasIssue(
+      result,
+      "AMAZON_KEYWORD_SEARCH_UNAVAILABLE"
+    ) ||
+    hasIssue(
+      result,
+      "AMAZON_RESTRICTION_CHECK_UNAVAILABLE"
+    )
+  ) {
+    result.status =
+      result.amazon.asin
+        ? "NEEDS_REVIEW"
+        : "NO_MATCH";
+
+    result.recommendation =
+      result.amazon.lastSearchError
+        ? `Amazon search was incomplete: ${result.amazon.lastSearchError}`
+        : "Amazon search was incomplete. Retry after the Amazon service is available.";
+
+    return result;
+  }
+
+  if (
+    hasIssue(
+      result,
       "MISSING_UPC"
     )
   ) {
@@ -933,7 +1035,9 @@ function classifyResult(
       "NO_MATCH";
 
     result.recommendation =
-      "Amazon has no catalog match for this barcode. Review for a new listing.";
+      result.barcode
+        ? "Amazon returned no verified match for this identifier. Review catalog candidates or prepare a new listing."
+        : "No verified Amazon match was found. Review supplier identifiers, manufacturer data, or GTIN-exemption eligibility.";
 
     return result;
   }
@@ -1105,12 +1209,18 @@ async function scanAmazonCatalogByIdentifier(
     );
 
   if (
-    !catalog.success
+    !catalog?.success
   ) {
-    throw new Error(
-      catalog.error ||
-      "Amazon catalog identifier search failed"
+    addAmazonWarning(
+      result,
+      "AMAZON_IDENTIFIER_SEARCH_UNAVAILABLE",
+      getErrorMessage(
+        catalog,
+        "Amazon catalog identifier search failed"
+      )
     );
+
+    return result;
   }
 
   result.amazon.matchCount =
@@ -1174,25 +1284,48 @@ async function scanAmazonCatalogByKeywords(
     return result;
   }
 
-  const catalog =
-    await searchCatalogItems({
-      keywords,
-      brandNames:
-        result.vendor ||
-        ""
-    });
+  let catalog;
+
+  try {
+    catalog =
+      await searchCatalogItems({
+        keywords,
+        brandNames:
+          result.vendor ||
+          ""
+      });
+  } catch (error) {
+    addAmazonWarning(
+      result,
+      "AMAZON_KEYWORD_SEARCH_UNAVAILABLE",
+      getErrorMessage(
+        error,
+        "Amazon catalog keyword search failed"
+      )
+    );
+
+    return result;
+  }
 
   if (
-    !catalog.success
+    !catalog?.success
   ) {
-    throw new Error(
-      catalog.error ||
-      "Amazon catalog keyword search failed"
+    addAmazonWarning(
+      result,
+      "AMAZON_KEYWORD_SEARCH_UNAVAILABLE",
+      getErrorMessage(
+        catalog,
+        "Amazon catalog keyword search failed"
+      )
     );
+
+    return result;
   }
 
   const items =
     catalog.items ||
+    catalog.matches ||
+    catalog.data?.items ||
     [];
 
   result.amazon.matchCount =
@@ -1311,12 +1444,21 @@ async function scanRestrictions(
     );
 
   if (
-    !restrictionResult.success
+    !restrictionResult?.success
   ) {
-    throw new Error(
-      restrictionResult.error ||
-      "Amazon restriction check failed"
+    addAmazonWarning(
+      result,
+      "AMAZON_RESTRICTION_CHECK_UNAVAILABLE",
+      getErrorMessage(
+        restrictionResult,
+        "Amazon restriction check failed"
+      )
     );
+
+    result.amazon.eligible =
+      null;
+
+    return result;
   }
 
   result.amazon.eligible =
@@ -1403,17 +1545,21 @@ export async function scanAmazonVariant(
       }
     }
   } catch (error) {
-    result.error =
-      error.message;
+    const message =
+      getErrorMessage(
+        error,
+        "Unexpected Amazon scan error"
+      );
 
-    result.issues.push({
-      code:
-        "AMAZON_SCAN_ERROR",
-      severity:
-        "ERROR",
-      message:
-        error.message
-    });
+    addAmazonWarning(
+      result,
+      "AMAZON_SCAN_WARNING",
+      message,
+      "REVIEW"
+    );
+
+    result.amazon.requiresManualReview =
+      true;
   }
 
   result.readinessScore =
