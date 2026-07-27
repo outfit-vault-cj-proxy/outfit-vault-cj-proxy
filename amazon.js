@@ -11,10 +11,13 @@ const LWA_TOKEN_URL =
 const DEFAULT_MARKETPLACE =
   "ATVPDKIKX0DER";
 
-const AMAZON_API_VERSION="amazon-api-v2";
+const AMAZON_API_VERSION = "amazon-api-v2.2-catalog-safe";
 
 const USER_AGENT =
   "TheOutfitVault/2.1 (Language=JavaScript; Platform=Node.js)";
+
+const TRANSIENT_SPAPI_STATUSES = new Set([502, 503, 504]);
+const SPAPI_RETRY_DELAY_MS = 1200;
 
 let cachedLWAToken = null;
 let lwaExpiresAt = 0;
@@ -107,16 +110,46 @@ function buildQueryString(query = {}) {
   const params = new URLSearchParams();
 
   for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === "") continue;
+    if (
+      value === undefined ||
+      value === null ||
+      value === ""
+    ) {
+      continue;
+    }
 
     if (Array.isArray(value)) {
-      for (const item of value) params.append(key, String(item));
-    } else {
-      params.append(key, String(value));
+      for (const item of value) {
+        if (
+          item === undefined ||
+          item === null ||
+          item === ""
+        ) {
+          continue;
+        }
+
+        params.append(key, String(item));
+      }
+
+      continue;
     }
+
+    params.append(key, String(value));
   }
 
   return params.toString();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getAmazonRequestId(headers) {
+  return (
+    headers?.get?.("x-amzn-requestid") ||
+    headers?.get?.("x-amz-request-id") ||
+    null
+  );
 }
 
 async function spApiCall(
@@ -124,7 +157,8 @@ async function spApiCall(
   path,
   query = {},
   body = null,
-  allowTokenRetry = true
+  allowTokenRetry = true,
+  allowTransientRetry = true
 ) {
   const lwaToken = await getLWAToken();
   const queryString = buildQueryString(query);
@@ -146,11 +180,26 @@ async function spApiCall(
     requestBody = JSON.stringify(body);
   }
 
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: requestBody
-  });
+  let response;
+
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: requestBody
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      data: null,
+      error: error.message,
+      requestId: null,
+      url,
+      path,
+      query
+    };
+  }
 
   if (
     (response.status === 401 || response.status === 403) &&
@@ -160,7 +209,30 @@ async function spApiCall(
     lwaExpiresAt = 0;
     await getLWAToken(true);
 
-    return spApiCall(method, path, query, body, false);
+    return spApiCall(
+      method,
+      path,
+      query,
+      body,
+      false,
+      allowTransientRetry
+    );
+  }
+
+  if (
+    TRANSIENT_SPAPI_STATUSES.has(response.status) &&
+    allowTransientRetry
+  ) {
+    await delay(SPAPI_RETRY_DELAY_MS);
+
+    return spApiCall(
+      method,
+      path,
+      query,
+      body,
+      allowTokenRetry,
+      false
+    );
   }
 
   const responseText = await response.text();
@@ -177,11 +249,17 @@ async function spApiCall(
   return {
     ok: response.ok,
     status: response.status,
-    data
+    data,
+    requestId: getAmazonRequestId(response.headers),
+    url,
+    path,
+    query
   };
 }
 
 function amazonError(result) {
+  if (!result) return "Unknown Amazon error";
+  if (result.error) return result.error;
   if (typeof result.data === "string") return result.data;
 
   return JSON.stringify(
@@ -189,6 +267,38 @@ function amazonError(result) {
       message: "Unknown Amazon error"
     }
   );
+}
+
+function amazonErrorDetails(result) {
+  const data = result?.data;
+
+  return {
+    status: result?.status ?? null,
+    requestId:
+      result?.requestId ||
+      data?.requestId ||
+      data?.errors?.[0]?.requestId ||
+      null,
+    code:
+      data?.code ||
+      data?.errorCode ||
+      data?.errors?.[0]?.code ||
+      null,
+    message:
+      data?.message ||
+      data?.error_description ||
+      data?.errors?.[0]?.message ||
+      (typeof data === "string"
+        ? data
+        : result?.error || null),
+    details:
+      data?.details ||
+      data?.errors?.[0]?.details ||
+      null,
+    upstreamBody: data ?? null,
+    requestPath: result?.path || null,
+    requestQuery: result?.query || null
+  };
 }
 
 function normalizeSku(value) {
@@ -275,119 +385,143 @@ export async function testConnection() {
   return checkConnection();
 }
 
+function normalizeDigits(value) {
+  return String(value || "")
+    .replace(/[\\s-]+/g, "")
+    .trim();
+}
+
+function normalizeUpc(value) {
+  const upc = normalizeDigits(value);
+
+  if (!/^\\d{12}$/.test(upc)) {
+    throw new Error(
+      "UPC must contain exactly 12 digits after removing spaces and hyphens."
+    );
+  }
+
+  return upc;
+}
+
+function normalizeCatalogIdentifier(value, type) {
+  const normalizedType = String(type || "")
+    .trim()
+    .toUpperCase();
+
+  const rawValue = normalizeDigits(value);
+
+  if (!ALLOWED_IDENTIFIER_TYPES.has(normalizedType)) {
+    throw new Error(
+      `Unsupported identifier type: ${normalizedType}`
+    );
+  }
+
+  if (normalizedType === "UPC") {
+    return normalizeUpc(rawValue);
+  }
+
+  if (
+    normalizedType === "EAN" &&
+    !/^\\d{13}$/.test(rawValue)
+  ) {
+    throw new Error("EAN must contain exactly 13 digits.");
+  }
+
+  if (
+    normalizedType === "GTIN" &&
+    !/^\\d{14}$/.test(rawValue)
+  ) {
+    throw new Error("GTIN must contain exactly 14 digits.");
+  }
+
+  if (normalizedType === "ASIN") {
+    return normalizeAsin(rawValue);
+  }
+
+  if (!rawValue) {
+    throw new Error("Product identifier is required.");
+  }
+
+  return rawValue;
+}
+
+function buildIdentifierCatalogQuery({
+  identifier,
+  identifierType
+}) {
+  const normalizedType = String(identifierType || "")
+    .trim()
+    .toUpperCase();
+
+  const normalizedIdentifier =
+    normalizeCatalogIdentifier(
+      identifier,
+      normalizedType
+    );
+
+  const query = {
+    marketplaceIds: getMarketplace(),
+    identifiers: normalizedIdentifier,
+    identifiersType: normalizedType,
+    includedData:
+      "summaries,identifiers,images,productTypes,classifications,relationships",
+    pageSize: 50
+  };
+
+  if (normalizedType === "SKU") {
+    query.sellerId = getSellerId();
+  }
+
+  return {
+    query,
+    normalizedIdentifier,
+    normalizedType
+  };
+}
+
+function buildKeywordCatalogQuery({
+  keywords,
+  brandNames
+}) {
+  const normalizedKeywords = String(keywords || "")
+    .replace(/\\s+/g, " ")
+    .trim();
+
+  const normalizedBrand = String(brandNames || "")
+    .replace(/\\s+/g, " ")
+    .trim();
+
+  if (!normalizedKeywords) {
+    throw new Error("Keywords are required.");
+  }
+
+  const query = {
+    marketplaceIds: getMarketplace(),
+    keywords: normalizedKeywords,
+    includedData:
+      "summaries,identifiers,images,productTypes,classifications,relationships",
+    pageSize: 50
+  };
+
+  if (normalizedBrand) {
+    query.brandNames = normalizedBrand;
+  }
+
+  return {
+    query,
+    normalizedKeywords,
+    normalizedBrand
+  };
+}
+
 export async function searchCatalogByIdentifier(
   identifier,
   identifierType = "UPC"
 ) {
-  try {
-    checkRuntimeCredentials();
-
-    if (!identifier) {
-      return {
-        success: false,
-        error: "Product identifier is required"
-      };
-    }
-
-    const normalizedIdentifier = String(identifier)
-      .trim()
-      .replace(/\s+/g, "");
-
-    const normalizedType = String(identifierType)
-      .trim()
-      .toUpperCase();
-
-    const allowedTypes = new Set([
-      "ASIN",
-      "EAN",
-      "GTIN",
-      "ISBN",
-      "JAN",
-      "MINSAN",
-      "SKU",
-      "UPC"
-    ]);
-
-    if (!allowedTypes.has(normalizedType)) {
-      return {
-        success: false,
-        error: `Unsupported identifier type: ${normalizedType}`
-      };
-    }
-
-    const query = {
-      marketplaceIds: getMarketplace(),
-      identifiers: normalizedIdentifier,
-      identifiersType: normalizedType,
-      includedData:
-        "summaries,identifiers,images,productTypes,classifications,relationships",
-      pageSize: 50
-    };
-
-    if (normalizedType === "SKU") query.sellerId = getSellerId();
-
-    const result = await spApiCall(
-      "GET",
-      "/catalog/2022-04-01/items",
-      query
-    );
-
-    if (!result.ok) {
-      return {
-        success: false,
-        status: result.status,
-        error: amazonError(result),
-        data: result.data
-      };
-    }
-
-    const items = result.data?.items || [];
-
-    return {
-      success: true,
-      apiVersion: AMAZON_API_VERSION,
-      identifier: normalizedIdentifier,
-      identifierType: normalizedType,
-      marketplaceId: getMarketplace(),
-      matchCount: items.length,
-      pagination: result.data?.pagination || null,
-      refinements: result.data?.refinements || null,
-      matches: items.map((item) => {
-        const summary =
-          item.summaries?.find(
-            (entry) => entry.marketplaceId === getMarketplace()
-          ) ||
-          item.summaries?.[0] ||
-          {};
-
-        const productType =
-          item.productTypes?.find(
-            (entry) => entry.marketplaceId === getMarketplace()
-          ) ||
-          item.productTypes?.[0] ||
-          {};
-
-        return {
-          asin: item.asin || null,
-          title: summary.itemName || null,
-          brand: summary.brand || null,
-          manufacturer: summary.manufacturer || null,
-          modelNumber: summary.modelNumber || null,
-          color: summary.color || null,
-          size: summary.size || null,
-          productType: productType.productType || null,
-          identifiers: item.identifiers || [],
-          images: item.images || [],
-          classifications: item.classifications || []
-        };
-      })
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
-  }
+  return searchCatalogItems({
+    identifiers: identifier,
+    identifiersType: identifierType
+  });
 }
 
 const ALLOWED_IDENTIFIER_TYPES = new Set([
@@ -515,81 +649,58 @@ export async function searchCatalogItems(params = {}) {
   try {
     checkRuntimeCredentials();
 
-    const identifiers = String(params.identifiers || "")
-      .trim()
-      .replace(/\s+/g, "");
+    const hasIdentifierInput =
+      params.identifiers !== undefined ||
+      params.identifiersType !== undefined;
 
-    const identifiersType = String(params.identifiersType || "")
-      .trim()
-      .toUpperCase();
+    const hasKeywordInput =
+      params.keywords !== undefined ||
+      params.brandNames !== undefined;
 
-    const keywords = String(params.keywords || "").trim();
-    const brandNames = String(params.brandNames || "").trim();
-
-    const hasIdentifierSearch = Boolean(identifiers || identifiersType);
-    const hasKeywordSearch = Boolean(keywords || brandNames);
-
-    if (hasIdentifierSearch && hasKeywordSearch) {
+    if (
+      hasIdentifierInput &&
+      hasKeywordInput
+    ) {
       return {
         success: false,
         error_code: "INVALID_REQUEST",
         error:
-          "Use either identifiers with identifiersType, or keywords with optional brandNames.",
+          "Use identifier search or keyword search, never both in the same request.",
         amazon_http_status: 400,
         amazon_error_type: "InvalidInput"
       };
     }
 
-    const query = {
-      marketplaceIds: getMarketplace(),
-      includedData: "summaries,identifiers,productTypes,relationships",
-      pageSize: 50
-    };
+    let searchMode;
+    let query;
+    let normalizedIdentifier = null;
+    let normalizedType = null;
+    let normalizedKeywords = null;
 
-    if (hasIdentifierSearch) {
-      if (!identifiers || !identifiersType) {
-        return {
-          success: false,
-          error_code: "INVALID_REQUEST",
-          error: "identifiers and identifiersType are both required.",
-          amazon_http_status: 400,
-          amazon_error_type: "InvalidInput"
-        };
-      }
+    if (hasIdentifierInput) {
+      const built =
+        buildIdentifierCatalogQuery({
+          identifier: params.identifiers,
+          identifierType: params.identifiersType
+        });
 
-      if (!ALLOWED_IDENTIFIER_TYPES.has(identifiersType)) {
-        return {
-          success: false,
-          error_code: "INVALID_REQUEST",
-          error: "Unsupported identifier type.",
-          amazon_http_status: 400,
-          amazon_error_type: "InvalidInput"
-        };
-      }
-
-      query.identifiers = identifiers;
-      query.identifiersType = identifiersType;
-
-      if (identifiersType === "SKU") {
-        query.sellerId = getSellerId();
-      }
+      searchMode = "IDENTIFIER";
+      query = built.query;
+      normalizedIdentifier =
+        built.normalizedIdentifier;
+      normalizedType =
+        built.normalizedType;
     } else {
-      if (!keywords) {
-        return {
-          success: false,
-          error_code: "INVALID_REQUEST",
-          error:
-            "Provide identifiers and identifiersType, or provide keywords.",
-          amazon_http_status: 400,
-          amazon_error_type: "InvalidInput"
-        };
-      }
+      const built =
+        buildKeywordCatalogQuery({
+          keywords: params.keywords,
+          brandNames: params.brandNames
+        });
 
-      query.keywords = keywords;
-
-      if (brandNames) {
-        query.brandNames = brandNames;
-      }
+      searchMode = "KEYWORD";
+      query = built.query;
+      normalizedKeywords =
+        built.normalizedKeywords;
     }
 
     const result = await spApiCall(
@@ -599,31 +710,81 @@ export async function searchCatalogItems(params = {}) {
     );
 
     if (!result.ok) {
+      const details =
+        amazonErrorDetails(result);
+
       return {
         success: false,
         ...catalogErrorForStatus(result.status),
-        amazon_http_status: result.status || null,
-        amazon_error_type: amazonCatalogErrorType(result.data)
+        searchMode,
+        amazon_http_status:
+          result.status ?? null,
+        upstreamStatus:
+          result.status ?? null,
+        amazon_error_type:
+          amazonCatalogErrorType(result.data),
+        amazon_error_code:
+          details.code,
+        amazon_error_message:
+          details.message,
+        amazon_request_id:
+          details.requestId,
+        amazon_error_details:
+          details.details,
+        upstreamBody:
+          details.upstreamBody,
+        requestPath:
+          details.requestPath,
+        requestQuery:
+          details.requestQuery
       };
     }
 
-    const items = (result.data?.items || []).map(normalizeCatalogItem);
+    const rawItems =
+      result.data?.items || [];
+
+    const items =
+      rawItems.map(normalizeCatalogItem);
 
     return {
       success: true,
       apiVersion: AMAZON_API_VERSION,
+      searchMode,
+      identifier:
+        normalizedIdentifier,
+      identifierType:
+        normalizedType,
+      keywords:
+        normalizedKeywords,
+      marketplaceId:
+        getMarketplace(),
       numberOfResults:
         result.data?.numberOfResults ??
         items.length,
-      items
+      items,
+      matches: items,
+      pagination:
+        result.data?.pagination || null,
+      refinements:
+        result.data?.refinements || null,
+      amazon_request_id:
+        result.requestId || null
     };
-  } catch {
+  } catch (error) {
     return {
       success: false,
       error_code: "AMAZON_CATALOG_ERROR",
-      error: "Amazon catalog request failed.",
+      error:
+        error.message ||
+        "Amazon catalog request failed.",
       amazon_http_status: null,
-      amazon_error_type: null
+      upstreamStatus: null,
+      amazon_error_type: null,
+      amazon_error_code: null,
+      amazon_error_message:
+        error.message || null,
+      amazon_request_id: null,
+      amazon_error_details: null
     };
   }
 }
