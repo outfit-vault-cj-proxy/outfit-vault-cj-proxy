@@ -11,7 +11,7 @@ const LWA_TOKEN_URL =
 const DEFAULT_MARKETPLACE =
   "ATVPDKIKX0DER";
 
-const AMAZON_API_VERSION = "amazon-api-v2.2.1-upc-regex-fixed";
+const AMAZON_API_VERSION = "amazon-api-v2.2.2-pagesize-20";
 
 const USER_AGENT =
   "TheOutfitVault/2.1 (Language=JavaScript; Platform=Node.js)";
@@ -465,7 +465,7 @@ function buildIdentifierCatalogQuery({
     identifiersType: normalizedType,
     includedData:
       "summaries,identifiers,images,productTypes,classifications,relationships",
-    pageSize: 50
+    pageSize: 20
   };
 
   if (normalizedType === "SKU") {
@@ -500,7 +500,7 @@ function buildKeywordCatalogQuery({
     keywords: normalizedKeywords,
     includedData:
       "summaries,identifiers,images,productTypes,classifications,relationships",
-    pageSize: 50
+    pageSize: 20
   };
 
   if (normalizedBrand) {
