@@ -11,7 +11,7 @@ const LWA_TOKEN_URL =
 const DEFAULT_MARKETPLACE =
   "ATVPDKIKX0DER";
 
-const AMAZON_API_VERSION = "amazon-api-v2.2-catalog-safe";
+const AMAZON_API_VERSION = "amazon-api-v2.2.1-upc-regex-fixed";
 
 const USER_AGENT =
   "TheOutfitVault/2.1 (Language=JavaScript; Platform=Node.js)";
@@ -387,14 +387,14 @@ export async function testConnection() {
 
 function normalizeDigits(value) {
   return String(value || "")
-    .replace(/[\\s-]+/g, "")
+    .replace(/[\s-]+/g, "")
     .trim();
 }
 
 function normalizeUpc(value) {
   const upc = normalizeDigits(value);
 
-  if (!/^\\d{12}$/.test(upc)) {
+  if (!/^\d{12}$/.test(upc)) {
     throw new Error(
       "UPC must contain exactly 12 digits after removing spaces and hyphens."
     );
@@ -422,14 +422,14 @@ function normalizeCatalogIdentifier(value, type) {
 
   if (
     normalizedType === "EAN" &&
-    !/^\\d{13}$/.test(rawValue)
+    !/^\d{13}$/.test(rawValue)
   ) {
     throw new Error("EAN must contain exactly 13 digits.");
   }
 
   if (
     normalizedType === "GTIN" &&
-    !/^\\d{14}$/.test(rawValue)
+    !/^\d{14}$/.test(rawValue)
   ) {
     throw new Error("GTIN must contain exactly 14 digits.");
   }
@@ -484,11 +484,11 @@ function buildKeywordCatalogQuery({
   brandNames
 }) {
   const normalizedKeywords = String(keywords || "")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 
   const normalizedBrand = String(brandNames || "")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 
   if (!normalizedKeywords) {
