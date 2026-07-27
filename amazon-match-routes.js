@@ -32,7 +32,7 @@ import {
   MATCH_STATUSES,
 } from "./amazon-match.js";
 
-const ROUTER_VERSION = "amazon-match-routes-v2";
+const ROUTER_VERSION = "amazon-match-routes-v2.2-search-safe";
 const DEFAULT_MINIMUM_READY_SCORE = 85;
 
 const DEFAULT_INCLUDED_DATA = [
@@ -45,7 +45,22 @@ const DEFAULT_INCLUDED_DATA = [
 ];
 
 function responseStatus(data) {
-  return data && data.success === false ? 502 : 200;
+  if (!data || data.success !== false) return 200;
+
+  const upstreamStatus = Number(
+    data.amazon_http_status ??
+      data.upstreamStatus
+  );
+
+  if (
+    Number.isInteger(upstreamStatus) &&
+    upstreamStatus >= 400 &&
+    upstreamStatus <= 599
+  ) {
+    return upstreamStatus;
+  }
+
+  return 502;
 }
 
 function jsonError(res, status, error) {
@@ -68,7 +83,7 @@ function requireAdmin(deps) {
 }
 
 // ---------------------------------------------------------------------------
-// GET /amazon/catalog/items  â identifier OR keyword search (never both)
+// GET /amazon/catalog/items  Ã¢ÂÂ identifier OR keyword search (never both)
 // ---------------------------------------------------------------------------
 
 export function createCatalogSearchHandler(deps) {
@@ -123,76 +138,276 @@ export function createCatalogSearchHandler(deps) {
   };
 }
 
+function unique(values = []) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function groupIdentifiers(values = []) {
+  const identifiers = unique(
+    values.map(normalizeIdentifier).filter(Boolean)
+  );
+
+  return {
+    all: identifiers,
+    UPC: identifiers.filter((value) => /^\d{12}$/.test(value)),
+    EAN: identifiers.filter((value) => /^\d{13}$/.test(value)),
+    GTIN: identifiers.filter((value) => /^\d{14}$/.test(value)),
+    ASIN: identifiers.filter((value) => /^[A-Z0-9]{10}$/.test(value))
+  };
+}
+
+function catalogFailureRecord(data, context = {}) {
+  return {
+    searchMode: data?.searchMode || context.searchMode || null,
+    identifier: context.identifier || null,
+    identifierType: context.identifierType || null,
+    keywords: context.keywords || null,
+    httpStatus: data?.amazon_http_status ?? data?.upstreamStatus ?? null,
+    amazonErrorCode: data?.amazon_error_code || data?.error_code || null,
+    amazonErrorType: data?.amazon_error_type || null,
+    amazonErrorMessage:
+      data?.amazon_error_message ||
+      data?.error ||
+      "Amazon catalog search failed.",
+    amazonRequestId: data?.amazon_request_id || null,
+    amazonErrorDetails: data?.amazon_error_details || null,
+    upstreamBody: data?.upstreamBody ?? null,
+    requestPath: data?.requestPath || null,
+    requestQuery: data?.requestQuery || null
+  };
+}
+
+function normalizeDecision(scoredMatches = [], options = {}) {
+  const rawDecision = chooseBestAmazonMatch(scoredMatches, options) || {};
+  const bestMatch =
+    rawDecision.bestMatch ||
+    ((rawDecision.asin || rawDecision.confidence !== undefined)
+      ? rawDecision
+      : null);
+  const status =
+    rawDecision.decision ||
+    rawDecision.status ||
+    bestMatch?.status ||
+    "NO_SAFE_MATCH";
+
+  return { rawDecision, bestMatch, status };
+}
+
+async function searchIdentifiers(deps, grouped, searchFn) {
+  const jobs = [];
+
+  for (const type of ["UPC", "EAN", "GTIN", "ASIN"]) {
+    for (const identifier of grouped[type] || []) {
+      jobs.push({
+        identifier,
+        identifierType: type,
+        promise: searchFn({
+          identifiers: identifier,
+          identifiersType: type,
+          includedData: DEFAULT_INCLUDED_DATA
+        })
+      });
+    }
+  }
+
+  const settled = await Promise.all(
+    jobs.map(async (job) => ({ ...job, data: await job.promise }))
+  );
+
+  const items = [];
+  const failures = [];
+
+  for (const result of settled) {
+    if (result.data?.success === false) {
+      failures.push(catalogFailureRecord(result.data, {
+        searchMode: "IDENTIFIER",
+        identifier: result.identifier,
+        identifierType: result.identifierType
+      }));
+      continue;
+    }
+
+    items.push(...(result.data?.items || result.data?.matches || []));
+  }
+
+  return { items, failures, searchCount: settled.length };
+}
+
+async function searchKeywords(deps, product, searchFn) {
+  const cleanKeywords = [
+    product?.vendor,
+    product?.productType,
+    product?.title
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+
+  if (!cleanKeywords) {
+    return {
+      items: [],
+      failures: [{
+        searchMode: "KEYWORD",
+        amazonErrorCode: "INVALID_REQUEST",
+        amazonErrorMessage: "No usable product keywords were available."
+      }],
+      searchCount: 0
+    };
+  }
+
+  const data = await searchFn({
+    keywords: cleanKeywords,
+    brandNames: product?.vendor || "",
+    includedData: DEFAULT_INCLUDED_DATA
+  });
+
+  if (data?.success === false) {
+    return {
+      items: [],
+      failures: [catalogFailureRecord(data, {
+        searchMode: "KEYWORD",
+        keywords: cleanKeywords
+      })],
+      searchCount: 1
+    };
+  }
+
+  return {
+    items: data?.items || data?.matches || [],
+    failures: [],
+    searchCount: 1
+  };
+}
+
+function dedupeCatalogItems(items = []) {
+  return Array.from(
+    new Map(
+      items
+        .filter((item) => item?.asin)
+        .map((item) => [item.asin, item])
+    ).values()
+  );
+}
+
+function buildSearchErrorResult({ product, identifiers, failures }) {
+  return {
+    shopifyProductId: product?.id || null,
+    shopifyTitle: product?.title || "",
+    shopifyVendor: product?.vendor || "",
+    shopifyProductType: product?.productType || "",
+    shopifyImage: product?.featuredImage || null,
+    identifiers,
+    status: "SEARCH_ERROR",
+    readiness: "NOT_AMAZON_READY",
+    confidence: 0,
+    publishEligible: false,
+    bestMatch: null,
+    matches: [],
+    searchErrors: failures,
+    error:
+      failures?.[0]?.amazonErrorMessage ||
+      "Amazon catalog search failed."
+  };
+}
+
 // ---------------------------------------------------------------------------
-// POST /amazon/match-product  â score one product against Amazon catalog
+// POST /amazon/match-product  Ã¢ÂÂ score one product against Amazon catalog
 // ---------------------------------------------------------------------------
 
 export function createProductMatchHandler(deps) {
   return async function productMatchHandler(req, res) {
     try {
       const product = req.body?.product;
+
       if (!product?.title) {
-        return res.status(400).json({ success: false, error: "Product title is required" });
+        return res.status(400).json({
+          success: false,
+          error: "Product title is required"
+        });
       }
 
-      const marketplaceId = deps.marketplaceId || process.env.AMAZON_MARKETPLACE_ID || "ATVPDKIKX0DER";
-      const variants = Array.isArray(product?.variants) ? product.variants : [];
+      const marketplaceId =
+        deps.marketplaceId ||
+        process.env.AMAZON_MARKETPLACE_ID ||
+        "ATVPDKIKX0DER";
 
-      const identifiers = [
+      const variants = Array.isArray(product?.variants)
+        ? product.variants
+        : [];
+
+      const grouped = groupIdentifiers([
         product?.barcode,
         product?.gtin,
         product?.upc,
         product?.ean,
-        ...variants.flatMap((v) => [v?.barcode, v?.gtin, v?.upc, v?.ean]),
-      ]
-        .map(normalizeIdentifier)
-        .filter(Boolean);
+        product?.asin,
+        ...variants.flatMap((variant) => [
+          variant?.barcode,
+          variant?.gtin,
+          variant?.upc,
+          variant?.ean,
+          variant?.asin
+        ])
+      ]);
 
-      let catalogData;
+      const searchResult = grouped.all.length > 0
+        ? await searchIdentifiers(
+            deps,
+            grouped,
+            (params) => deps.searchCatalogItems(params)
+          )
+        : await searchKeywords(
+            deps,
+            product,
+            (params) => deps.searchCatalogItems(params)
+          );
 
-      if (identifiers.length) {
-        const groups = {
-          UPC: identifiers.filter((v) => /^\d{12}$/.test(v)),
-          EAN: identifiers.filter((v) => /^\d{13}$/.test(v)),
-          ASIN: identifiers.filter((v) => /^[A-Z0-9]{10}$/.test(v)),
-        };
-        const searches = [];
-        for (const [type, values] of Object.entries(groups)) {
-          if (values.length) {
-            searches.push(
-              deps.searchCatalogItems({
-                identifiers: values.slice(0, 20),
-                identifiersType: type,
-                includedData: DEFAULT_INCLUDED_DATA,
-              })
-            );
-          }
-        }
-        const responses = await Promise.all(searches);
-        catalogData = { items: responses.flatMap((r) => r?.items || []) };
-      } else {
-        const cleanKeywords = [product?.vendor, product?.productType, product?.title]
-          .filter(Boolean)
-          .join(" ")
-          .slice(0, 500);
-        catalogData = await deps.searchCatalogItems({
-          keywords: cleanKeywords,
-          brandNames: product?.vendor ? [product.vendor] : [],
-          includedData: DEFAULT_INCLUDED_DATA,
+      const uniqueItems = dedupeCatalogItems(searchResult.items);
+
+      if (
+        uniqueItems.length === 0 &&
+        searchResult.failures.length > 0
+      ) {
+        const failed = buildSearchErrorResult({
+          product,
+          identifiers: grouped.all,
+          failures: searchResult.failures
+        });
+
+        return res.status(502).json({
+          success: false,
+          version: ROUTER_VERSION,
+          product: {
+            id: product?.id || null,
+            handle: product?.handle || null,
+            title: product?.title || "",
+            vendor: product?.vendor || "",
+            productType: product?.productType || "",
+            featuredImage: product?.featuredImage || null,
+            variants
+          },
+          ...failed
         });
       }
 
-      const uniqueItems = Array.from(
-        new Map(
-          (catalogData?.items || []).filter((item) => item?.asin).map((item) => [item.asin, item])
-        ).values()
+      const scoredMatches = uniqueItems.map((item) =>
+        scoreAmazonCandidate({
+          product,
+          item,
+          marketplaceId,
+          inputIdentifiers: grouped.all
+        })
       );
 
-      const scoredMatches = uniqueItems.map((item) =>
-        scoreAmazonCandidate({ product, item, marketplaceId, inputIdentifiers: identifiers })
-      );
-      const decision = chooseBestAmazonMatch(scoredMatches,{minimumAutoMatchConfidence:95,minimumReviewConfidence:75});
+      const decision = normalizeDecision(scoredMatches, {
+        minimumAutoMatchConfidence: 95,
+        minimumReviewConfidence: 75
+      });
+
       const bestMatch = decision.bestMatch;
+      const confidence = Number(bestMatch?.confidence) || 0;
 
       return res.json({
         success: true,
@@ -204,13 +419,25 @@ export function createProductMatchHandler(deps) {
           vendor: product?.vendor || "",
           productType: product?.productType || "",
           featuredImage: product?.featuredImage || null,
-          variants,
+          variants
         },
-        identifiers,
-        status: decision.decision,
-        readiness: bestMatch?.confidence >= DEFAULT_MINIMUM_READY_SCORE ? "AMAZON_READY":"NOT_AMAZON_READY",
+        identifiers: grouped.all,
+        status: decision.status,
+        readiness:
+          confidence >= DEFAULT_MINIMUM_READY_SCORE
+            ? "AMAZON_READY"
+            : "NOT_AMAZON_READY",
+        publishEligible:
+          decision.status === "IDENTIFIER_MATCH" &&
+          confidence >= 95,
         bestMatch,
-        matches: scoredMatches.sort((a, b) => b.confidence - a.confidence).slice(0, 10),
+        matches: scoredMatches
+          .sort((a, b) => b.confidence - a.confidence)
+          .slice(0, 10),
+        searchWarnings:
+          searchResult.failures.length > 0
+            ? searchResult.failures
+            : undefined
       });
     } catch (error) {
       return jsonError(res, 500, error);
@@ -219,7 +446,7 @@ export function createProductMatchHandler(deps) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /admin/amazon/rematch-all  â batch rescan with dry-run support
+// POST /admin/amazon/rematch-all  Ã¢ÂÂ batch rescan with dry-run support
 // ---------------------------------------------------------------------------
 
 function sleep(ms) {
@@ -233,7 +460,16 @@ async function searchWithBackoff(deps, params, logger) {
   while (true) {
     attempt++;
     const data = await deps.searchCatalogItems(params);
-    if (data && data.success === false && data.amazon_http_status === 429 && attempt < maxAttempts) {
+    const status = Number(
+      data?.amazon_http_status ??
+        data?.upstreamStatus
+    );
+
+    if (
+      data?.success === false &&
+      status === 429 &&
+      attempt < maxAttempts
+    ) {
       const wait = Math.min(2000 * 2 ** (attempt - 1), 16000);
       logger?.log?.(`[rematch-all] 429 throttled, backing off ${wait}ms (attempt ${attempt})`);
       await sleep(wait);
@@ -289,49 +525,72 @@ export function createRematchAllHandler(deps) {
         counts.processed++;
         let result;
         try {
-          const variants = Array.isArray(product?.variants) ? product.variants : [];
-          const identifiers = [
-            product?.barcode, product?.gtin, product?.upc, product?.ean,
-            ...variants.flatMap((v) => [v?.barcode, v?.gtin, v?.upc, v?.ean]),
-          ].map(normalizeIdentifier).filter(Boolean);
+          const variants = Array.isArray(product?.variants)
+            ? product.variants
+            : [];
 
-          let catalogData;
-          if (identifiers.length) {
-            const groups = {
-              UPC: identifiers.filter((v) => /^\d{12}$/.test(v)),
-              EAN: identifiers.filter((v) => /^\d{13}$/.test(v)),
-              ASIN: identifiers.filter((v) => /^[A-Z0-9]{10}$/.test(v)),
-            };
-            const responses = await Promise.all(
-              Object.entries(groups)
-                .filter(([, v]) => v.length)
-                .map(([type, v]) =>
-                  searchWithBackoff(
-                    deps,
-                    { identifiers: v.slice(0, 20), identifiersType: type, includedData: DEFAULT_INCLUDED_DATA },
-                    logger
-                  )
-                )
-            );
-            catalogData = { items: responses.flatMap((r) => r?.items || []) };
-          } else {
+          const grouped = groupIdentifiers([
+            product?.barcode,
+            product?.gtin,
+            product?.upc,
+            product?.ean,
+            product?.asin,
+            ...variants.flatMap((variant) => [
+              variant?.barcode,
+              variant?.gtin,
+              variant?.upc,
+              variant?.ean,
+              variant?.asin
+            ])
+          ]);
+
+          if (grouped.all.length === 0) {
             counts.missingIdentifiers++;
-            const cleanKeywords = [product?.vendor, product?.productType, product?.title]
-              .filter(Boolean).join(" ").slice(0, 500);
-            catalogData = await searchWithBackoff(
-              deps,
-              { keywords: cleanKeywords, brandNames: product?.vendor ? [product.vendor] : [], includedData: DEFAULT_INCLUDED_DATA },
-              logger
-            );
           }
 
-          const uniqueItems = Array.from(
-            new Map((catalogData?.items || []).filter((i) => i?.asin).map((i) => [i.asin, i])).values()
-          );
+          const searchResult = grouped.all.length > 0
+            ? await searchIdentifiers(
+                deps,
+                grouped,
+                (params) => searchWithBackoff(deps, params, logger)
+              )
+            : await searchKeywords(
+                deps,
+                product,
+                (params) => searchWithBackoff(deps, params, logger)
+              );
+
+          const uniqueItems = dedupeCatalogItems(searchResult.items);
+
+          if (
+            uniqueItems.length === 0 &&
+            searchResult.failures.length > 0
+          ) {
+            counts.searchErrors++;
+
+            result = buildSearchErrorResult({
+              product,
+              identifiers: grouped.all,
+              failures: searchResult.failures
+            });
+
+            results.push(result);
+            continue;
+          }
+
           const scored = uniqueItems.map((item) =>
-            scoreAmazonCandidate({ product, item, marketplaceId, inputIdentifiers: identifiers })
+            scoreAmazonCandidate({
+              product,
+              item,
+              marketplaceId,
+              inputIdentifiers: grouped.all
+            })
           );
-          const best = chooseBestAmazonMatch(scored);
+
+          const decision = normalizeDecision(scored);
+          const best = decision.bestMatch;
+          const status = decision.status;
+          const confidence = Number(best?.confidence) || 0;
 
           result = {
             shopifyProductId: product?.id || null,
@@ -339,20 +598,44 @@ export function createRematchAllHandler(deps) {
             shopifyVendor: product?.vendor || "",
             shopifyProductType: product?.productType || "",
             shopifyImage: product?.featuredImage || null,
-            identifiers,
-            status: best?.status || "NO_SAFE_MATCH",
-            confidence: best?.confidence || 0,
+            identifiers: grouped.all,
+            status,
+            readiness:
+              confidence >= DEFAULT_MINIMUM_READY_SCORE
+                ? "AMAZON_READY"
+                : "NOT_AMAZON_READY",
+            confidence,
+            publishEligible:
+              status === "IDENTIFIER_MATCH" &&
+              confidence >= 95,
             bestMatch: best,
-            matches: scored.sort((a, b) => b.confidence - a.confidence).slice(0, 10),
+            matches: scored
+              .sort((a, b) => b.confidence - a.confidence)
+              .slice(0, 10),
+            searchWarnings:
+              searchResult.failures.length > 0
+                ? searchResult.failures
+                : undefined
           };
 
-          if (best?.status === "IDENTIFIER_MATCH") counts.identifierMatches++;
-          else if (best?.status === "HIGH_CONFIDENCE_REVIEW") counts.reviewMatches++;
-          else if (best?.conflicts?.productType) counts.categoryConflicts++;
-          else if (best?.conflicts?.brand) counts.brandConflicts++;
-          else if (best?.status === "NO_SAFE_MATCH") counts.noSafeMatches++;
+          if (status === "IDENTIFIER_MATCH") {
+            counts.identifierMatches++;
+          } else if (status === "HIGH_CONFIDENCE_REVIEW") {
+            counts.reviewMatches++;
+          } else if (best?.conflicts?.productType) {
+            counts.categoryConflicts++;
+          } else if (best?.conflicts?.brand) {
+            counts.brandConflicts++;
+          } else if (status === "NO_SAFE_MATCH") {
+            counts.noSafeMatches++;
+          }
 
-          if (!dryRun && deps.saveMatchReview && best?.status !== "NO_SAFE_MATCH") {
+          if (
+            !dryRun &&
+            deps.saveMatchReview &&
+            status !== "NO_SAFE_MATCH" &&
+            status !== "SEARCH_ERROR"
+          ) {
             await deps.saveMatchReview(result);
           }
         } catch (err) {
