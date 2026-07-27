@@ -11,8 +11,10 @@ const LWA_TOKEN_URL =
 const DEFAULT_MARKETPLACE =
   "ATVPDKIKX0DER";
 
+const AMAZON_API_VERSION="amazon-api-v2";
+
 const USER_AGENT =
-  "TheOutfitVault/2.0 (Language=JavaScript; Platform=Node.js)";
+  "TheOutfitVault/2.1 (Language=JavaScript; Platform=Node.js)";
 
 let cachedLWAToken = null;
 let lwaExpiresAt = 0;
@@ -256,6 +258,7 @@ export async function checkConnection() {
 
     return {
       success: true,
+      apiVersion: AMAZON_API_VERSION,
       seller_id: getSellerId(),
       marketplace: getMarketplace(),
       participations: result.data?.payload || []
@@ -317,8 +320,8 @@ export async function searchCatalogByIdentifier(
       identifiers: normalizedIdentifier,
       identifiersType: normalizedType,
       includedData:
-        "summaries,identifiers,images,productTypes,classifications",
-      pageSize: 20
+        "summaries,identifiers,images,productTypes,classifications,relationships",
+      pageSize: 50
     };
 
     if (normalizedType === "SKU") query.sellerId = getSellerId();
@@ -342,6 +345,7 @@ export async function searchCatalogByIdentifier(
 
     return {
       success: true,
+      apiVersion: AMAZON_API_VERSION,
       identifier: normalizedIdentifier,
       identifierType: normalizedType,
       marketplaceId: getMarketplace(),
@@ -539,7 +543,7 @@ export async function searchCatalogItems(params = {}) {
     const query = {
       marketplaceIds: getMarketplace(),
       includedData: "summaries,identifiers,productTypes,relationships",
-      pageSize: 20
+      pageSize: 50
     };
 
     if (hasIdentifierSearch) {
@@ -607,6 +611,7 @@ export async function searchCatalogItems(params = {}) {
 
     return {
       success: true,
+      apiVersion: AMAZON_API_VERSION,
       numberOfResults:
         result.data?.numberOfResults ??
         items.length,
@@ -1334,6 +1339,7 @@ export async function publishListing(product) {
 
     return {
       success: true,
+      apiVersion: AMAZON_API_VERSION,
       sku,
       status: result.data?.status || "SUBMITTED",
       issues: result.data?.issues || [],
