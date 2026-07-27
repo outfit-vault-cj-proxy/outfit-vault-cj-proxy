@@ -40,7 +40,7 @@ if (typeof getShopifyVariants !== "function") {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const SERVER_VERSION = "amazon-intelligence-upgrade-v2";
+const SERVER_VERSION = "amazon-intelligence-upgrade-v2.1-restrictions-route";
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -217,6 +217,138 @@ function responseStatus(data) {
   if (data?.success) return 200;
   if (Number.isInteger(data?.status)) return data.status;
   return 502;
+}
+
+function requireAmazonAdmin(req, res) {
+  const expected = process.env.AMAZON_AUTH_SECRET;
+  const provided = req.headers["x-admin-key"];
+
+  if (!expected) {
+    res.status(500).json({
+      success: false,
+      eligible: null,
+      restrictions: [],
+      stage: "RESTRICTION_CHECK_ERROR",
+      error_code: "PROXY_CONFIGURATION_ERROR",
+      error: "AMAZON_AUTH_SECRET is not configured"
+    });
+    return false;
+  }
+
+  if (
+    typeof provided !== "string" ||
+    provided !== expected
+  ) {
+    res.status(401).json({
+      success: false,
+      eligible: null,
+      restrictions: [],
+      stage: "RESTRICTION_CHECK_ERROR",
+      error_code: "PROXY_AUTH_ERROR",
+      error: "Unauthorized"
+    });
+    return false;
+  }
+
+  return true;
+}
+
+async function handleAmazonRestrictions(req, res) {
+  if (!requireAmazonAdmin(req, res)) {
+    return;
+  }
+
+  const asin = String(req.query.asin || "")
+    .trim()
+    .toUpperCase();
+
+  const conditionType = String(
+    req.query.conditionType ||
+    req.query.condition ||
+    "new_new"
+  ).trim();
+
+  if (!/^[A-Z0-9]{10}$/.test(asin)) {
+    return res.status(400).json({
+      success: false,
+      asin,
+      conditionType,
+      eligible: null,
+      restrictions: [],
+      stage: "INVALID",
+      error_code: "INVALID_ASIN",
+      error: "A valid 10-character ASIN is required.",
+      endpoint: req.path
+    });
+  }
+
+  try {
+    const data =
+      await getListingRestrictions(
+        asin,
+        conditionType
+      );
+
+    if (!data?.success) {
+      return res
+        .status(
+          Number.isInteger(data?.status)
+            ? data.status
+            : 502
+        )
+        .json({
+          ...data,
+          success: false,
+          asin,
+          conditionType,
+          eligible: null,
+          restrictions:
+            Array.isArray(data?.restrictions)
+              ? data.restrictions
+              : [],
+          stage: "RESTRICTION_CHECK_ERROR",
+          endpoint: req.path
+        });
+    }
+
+    const restrictions =
+      Array.isArray(data.restrictions)
+        ? data.restrictions
+        : [];
+
+    const eligible =
+      data.eligible === true &&
+      restrictions.length === 0;
+
+    return res.status(200).json({
+      ...data,
+      success: true,
+      asin,
+      conditionType,
+      eligible,
+      restrictions,
+      stage:
+        eligible
+          ? "ELIGIBLE"
+          : "RESTRICTED",
+      endpoint: req.path
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      asin,
+      conditionType,
+      eligible: null,
+      restrictions: [],
+      stage: "RESTRICTION_CHECK_ERROR",
+      error_code: "PROXY_RUNTIME_ERROR",
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error),
+      endpoint: req.path
+    });
+  }
 }
 
 /* =========================================================
@@ -869,6 +1001,8 @@ app.get("/health", async (req, res) => {
         "/amazon/offer/preview",
       amazonCreate:
         "/amazon/offer/create",
+      amazonRestrictions:
+        "/amazon/restrictions?asin=B077SH7LZH&conditionType=new_new",
       amazonPublishPage:
         "/amazon/publish-page"
     }
@@ -1844,33 +1978,13 @@ app.get(
   }
 );
 app.get(
+  "/amazon/restrictions",
+  handleAmazonRestrictions
+);
+
+app.get(
   "/amazon/offer/restrictions",
-  async (req, res) => {
-    try {
-      const asin = req.query.asin;
-
-      if (!asin) {
-        return jsonError(
-          res,
-          400,
-          "asin required"
-        );
-      }
-
-      const data =
-        await getListingRestrictions(
-          asin,
-          req.query.condition ||
-            "new_new"
-        );
-
-      res
-        .status(responseStatus(data))
-        .json(data);
-    } catch (error) {
-      jsonError(res, 500, error);
-    }
-  }
+  handleAmazonRestrictions
 );
 
 app.get(
@@ -1941,62 +2055,116 @@ app.post(
     }
   }
 );
-app.post("/amazon/eligibility/check", async (req, res) => {
-  const product = req.body?.product || req.body || {};
+app.post(
+  "/amazon/eligibility/check",
+  async (req, res) => {
+    if (!requireAmazonAdmin(req, res)) {
+      return;
+    }
 
-  const asin = product.asin || product.amazon_asin;
-  const conditionType =
-    product.condition_type ||
-    product.conditionType ||
-    "new_new";
+    const product =
+      req.body?.product ||
+      req.body ||
+      {};
 
-  if (!asin) {
-    return res.status(400).json({
-      success: false,
-      stage: "INVALID",
-      eligible: false,
-      error: "Product ASIN is required",
-      endpoint: "/amazon/eligibility/check",
-      receivedBody: req.body || null
-    });
-  }
+    const asin = String(
+      product.asin ||
+      product.amazon_asin ||
+      ""
+    )
+      .trim()
+      .toUpperCase();
 
-  try {
-    const data = await getListingRestrictions(
-      asin,
-      conditionType
-    );
+    const conditionType = String(
+      product.condition_type ||
+      product.conditionType ||
+      "new_new"
+    ).trim();
 
-    return res
-      .status(
-        data?.success
-          ? 200
-          : Number.isInteger(data?.status)
-            ? data.status
-            : 502
-      )
-      .json({
-        ...data,
-        stage: data?.success
-          ? data?.eligible
-            ? "ELIGIBLE"
-            : "RESTRICTED"
-          : "RESTRICTIONS_CHECK",
+    if (!/^[A-Z0-9]{10}$/.test(asin)) {
+      return res.status(400).json({
+        success: false,
+        asin,
+        conditionType,
+        eligible: null,
+        restrictions: [],
+        stage: "INVALID",
+        error_code: "INVALID_ASIN",
+        error: "A valid 10-character ASIN is required.",
         endpoint: "/amazon/eligibility/check"
       });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      stage: "RESTRICTIONS_CHECK",
-      eligible: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : String(error),
-      endpoint: "/amazon/eligibility/check"
-    });
+    }
+
+    try {
+      const data =
+        await getListingRestrictions(
+          asin,
+          conditionType
+        );
+
+      if (!data?.success) {
+        return res
+          .status(
+            Number.isInteger(data?.status)
+              ? data.status
+              : 502
+          )
+          .json({
+            ...data,
+            success: false,
+            asin,
+            conditionType,
+            eligible: null,
+            restrictions:
+              Array.isArray(data?.restrictions)
+                ? data.restrictions
+                : [],
+            stage: "RESTRICTION_CHECK_ERROR",
+            endpoint: "/amazon/eligibility/check"
+          });
+      }
+
+      const restrictions =
+        Array.isArray(data.restrictions)
+          ? data.restrictions
+          : [];
+
+      const eligible =
+        data.eligible === true &&
+        restrictions.length === 0;
+
+      return res.status(200).json({
+        ...data,
+        success: true,
+        asin,
+        conditionType,
+        eligible,
+        restrictions,
+        stage:
+          eligible
+            ? "ELIGIBLE"
+            : "RESTRICTED",
+        endpoint: "/amazon/eligibility/check"
+      });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        asin,
+        conditionType,
+        eligible: null,
+        restrictions: [],
+        stage: "RESTRICTION_CHECK_ERROR",
+        error_code: "PROXY_RUNTIME_ERROR",
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+        endpoint: "/amazon/eligibility/check"
+      });
+    }
   }
-});
+);
+
 app.post(
   "/amazon/offer/create",
   async (req, res) => {
@@ -2967,6 +3135,8 @@ app.use((req, res) => {
   "/amazon/catalog/search?upc=889359349981",
 catalogItems:
   "/amazon/catalog/items?keywords=dress",
+restrictions:
+  "/amazon/restrictions?asin=B077SH7LZH&conditionType=new_new",
 offerPreview:
   "/amazon/offer/preview?asin=B077SH7LZH&sku=...",
     }
