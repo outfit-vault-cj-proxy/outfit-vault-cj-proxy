@@ -1,20 +1,54 @@
+/* eslint-env node */
 
-// amazon-match.js
+// amazonMatcher.js
 //
-// Portable Amazon Catalog Match Engine — pure, dependency-free matching logic.
-// No Base44 SDK, no Express, no Railway startup code. Safe to drop into the
-// live outfit-vault-cj-proxy repository and unit-test in isolation.
+// Portable Amazon Catalog Match Engine.
+// Pure matching logic with no Express, Railway, Base44, or Amazon SDK dependency.
+//
+// Supports both:
+//   chooseBestAmazonMatch(sourceProduct, catalogItems, options)
+// and legacy:
+//   chooseBestAmazonMatch(scoredMatches)
 //
 // Exports:
 //   normalizeText, toArray, normalizeIdentifier, isValidIdentifier,
 //   extractAmazonIdentifiers, extractAmazonTitle, extractAmazonBrand,
 //   extractAmazonProductType, normalizeApparelCategory, categoriesConflict,
 //   calculateTextSimilarity, scoreAmazonCandidate, chooseBestAmazonMatch,
-//   MATCH_STATUSES, AMAZON_IDENTIFIER_TYPES
+//   MATCH_STATUSES, MATCH_DECISIONS, AMAZON_IDENTIFIER_TYPES
 
-// ---------------------------------------------------------------------------
-// Text + identifier helpers
-// ---------------------------------------------------------------------------
+const MATCHER_VERSION = "amazon-matcher-v2";
+
+export const AMAZON_IDENTIFIER_TYPES = [
+  "ASIN",
+  "UPC",
+  "EAN",
+  "ISBN",
+  "JAN",
+  "GTIN"
+];
+
+export const MATCH_STATUSES = [
+  "IDENTIFIER_MATCH",
+  "HIGH_CONFIDENCE_REVIEW",
+  "MANUAL_REVIEW",
+  "NO_SAFE_MATCH",
+  "MISSING_IDENTIFIER",
+  "CATEGORY_CONFLICT",
+  "BRAND_CONFLICT",
+  "VARIANT_CONFLICT",
+  "SEARCH_ERROR"
+];
+
+export const MATCH_DECISIONS = [
+  "AUTO_MATCH",
+  "NEEDS_REVIEW",
+  "NO_SAFE_MATCH"
+];
+
+/* =========================================================
+   TEXT + IDENTIFIER HELPERS
+========================================================= */
 
 export function normalizeText(value) {
   return String(value || "")
@@ -29,16 +63,20 @@ export function normalizeText(value) {
 export function toArray(value) {
   if (Array.isArray(value)) {
     return value
-      .flatMap((item) => String(item || "").split(","))
+      .flatMap((item) =>
+        String(item || "").split(",")
+      )
       .map((item) => item.trim())
       .filter(Boolean);
   }
+
   if (typeof value === "string") {
     return value
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
   }
+
   return [];
 }
 
@@ -49,63 +87,174 @@ export function normalizeIdentifier(value) {
     .trim();
 }
 
-export function isValidIdentifier(value, type = "") {
-  const normalized = normalizeIdentifier(value);
-  const normalizedType = String(type || "").toUpperCase();
+function isValidGtinCheckDigit(value) {
+  const normalized =
+    normalizeIdentifier(value);
 
-  if (!normalized) return false;
+  if (!/^\d+$/.test(normalized)) {
+    return false;
+  }
 
-  if (normalizedType === "ASIN") return /^[A-Z0-9]{10}$/.test(normalized);
-  if (normalizedType === "UPC") return /^\d{12}$/.test(normalized);
-  if (normalizedType === "EAN") return /^\d{13}$/.test(normalized);
-  if (normalizedType === "ISBN") return /^(\d{10}|\d{13})$/.test(normalized);
-  if (normalizedType === "JAN") return /^\d{8}$|^\d{13}$/.test(normalized);
+  const digits = normalized
+    .split("")
+    .map(Number);
+
+  if (digits.length < 2) {
+    return false;
+  }
+
+  const suppliedCheckDigit =
+    digits.pop();
+
+  const sum = digits
+    .reverse()
+    .reduce(
+      (total, digit, index) =>
+        total +
+        digit *
+          (index % 2 === 0 ? 3 : 1),
+      0
+    );
+
+  const expectedCheckDigit =
+    (10 - (sum % 10)) % 10;
 
   return (
-    /^[A-Z0-9]{10}$/.test(normalized) ||
-    /^\d{12}$/.test(normalized) ||
-    /^\d{13}$/.test(normalized)
+    suppliedCheckDigit ===
+    expectedCheckDigit
   );
 }
 
-export const AMAZON_IDENTIFIER_TYPES = ["ASIN", "UPC", "EAN", "ISBN", "JAN"];
+export function isValidIdentifier(
+  value,
+  type = ""
+) {
+  const normalized =
+    normalizeIdentifier(value);
 
-// ---------------------------------------------------------------------------
-// Amazon item field extraction (handles nested identifiers / summaries)
-// ---------------------------------------------------------------------------
+  const normalizedType =
+    String(type || "")
+      .trim()
+      .toUpperCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalizedType === "ASIN") {
+    return /^[A-Z0-9]{10}$/.test(
+      normalized
+    );
+  }
+
+  if (normalizedType === "UPC") {
+    return (
+      /^\d{12}$/.test(normalized) &&
+      isValidGtinCheckDigit(normalized)
+    );
+  }
+
+  if (
+    normalizedType === "EAN" ||
+    normalizedType === "JAN"
+  ) {
+    return (
+      /^\d{13}$/.test(normalized) &&
+      isValidGtinCheckDigit(normalized)
+    );
+  }
+
+  if (normalizedType === "GTIN") {
+    return (
+      /^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(
+        normalized
+      ) &&
+      isValidGtinCheckDigit(normalized)
+    );
+  }
+
+  if (normalizedType === "ISBN") {
+    if (/^\d{13}$/.test(normalized)) {
+      return isValidGtinCheckDigit(
+        normalized
+      );
+    }
+
+    return /^\d{9}[\dX]$/.test(
+      normalized
+    );
+  }
+
+  if (/^[A-Z0-9]{10}$/.test(normalized)) {
+    return true;
+  }
+
+  if (
+    /^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(
+      normalized
+    )
+  ) {
+    return isValidGtinCheckDigit(
+      normalized
+    );
+  }
+
+  return false;
+}
+
+/* =========================================================
+   AMAZON ITEM FIELD EXTRACTION
+========================================================= */
 
 export function extractAmazonIdentifiers(item) {
-  const result = [];
+  const identifiers = [];
 
   if (item?.asin) {
-    result.push({
+    identifiers.push({
+      marketplaceId: null,
       type: "ASIN",
-      value: normalizeIdentifier(item.asin),
+      value: normalizeIdentifier(
+        item.asin
+      )
     });
   }
 
-  const identifierGroups = Array.isArray(item?.identifiers)
-    ? item.identifiers
-    : [];
+  const identifierGroups =
+    Array.isArray(item?.identifiers)
+      ? item.identifiers
+      : [];
 
   for (const entry of identifierGroups) {
-    // Raw SP-API shape:
-    // [{ marketplaceId, identifiers: [{ identifierType, identifier }] }]
-    if (Array.isArray(entry?.identifiers)) {
-      for (const identifier of entry.identifiers) {
+    if (
+      Array.isArray(
+        entry?.identifiers
+      )
+    ) {
+      for (
+        const identifier of
+        entry.identifiers
+      ) {
         const type = String(
-          identifier?.identifierType || identifier?.type || ""
-        ).toUpperCase();
+          identifier?.identifierType ||
+          identifier?.type ||
+          ""
+        )
+          .trim()
+          .toUpperCase();
 
-        const value = normalizeIdentifier(
-          identifier?.identifier || identifier?.value
-        );
+        const value =
+          normalizeIdentifier(
+            identifier?.identifier ||
+            identifier?.value
+          );
 
         if (value) {
-          result.push({
-            marketplaceId: entry?.marketplaceId || null,
+          identifiers.push({
+            marketplaceId:
+              entry?.marketplaceId ||
+              null,
             type,
-            value,
+            value
           });
         }
       }
@@ -113,249 +262,845 @@ export function extractAmazonIdentifiers(item) {
       continue;
     }
 
-    // Railway normalized shape:
-    // [{ type: "UPC", value: "889359349981" }]
     const type = String(
-      entry?.type || entry?.identifierType || ""
-    ).toUpperCase();
+      entry?.type ||
+      entry?.identifierType ||
+      ""
+    )
+      .trim()
+      .toUpperCase();
 
-    const value = normalizeIdentifier(
-      entry?.value || entry?.identifier
-    );
+    const value =
+      normalizeIdentifier(
+        entry?.value ||
+        entry?.identifier
+      );
 
     if (value) {
-      result.push({
-        marketplaceId: entry?.marketplaceId || null,
+      identifiers.push({
+        marketplaceId:
+          entry?.marketplaceId ||
+          null,
         type,
-        value,
+        value
       });
     }
   }
 
-  return result.filter(
+  const directFields = [
+    ["UPC", item?.upc],
+    ["EAN", item?.ean],
+    ["GTIN", item?.gtin],
+    ["ISBN", item?.isbn],
+    ["JAN", item?.jan]
+  ];
+
+  for (
+    const [type, rawValue] of
+    directFields
+  ) {
+    const value =
+      normalizeIdentifier(rawValue);
+
+    if (value) {
+      identifiers.push({
+        marketplaceId: null,
+        type,
+        value
+      });
+    }
+  }
+
+  return identifiers.filter(
     (entry, index, array) =>
       entry.value &&
       array.findIndex(
         (candidate) =>
-          candidate.type === entry.type &&
-          candidate.value === entry.value
+          candidate.type ===
+            entry.type &&
+          candidate.value ===
+            entry.value
       ) === index
   );
 }
 
-export function extractAmazonTitle(item, marketplaceId = null) {
-  const summaries = Array.isArray(item?.summaries)
-    ? item.summaries
-    : [];
+export function extractAmazonTitle(
+  item,
+  marketplaceId = null
+) {
+  const summaries =
+    Array.isArray(item?.summaries)
+      ? item.summaries
+      : [];
 
   const summary =
     summaries.find(
       (entry) =>
-        !marketplaceId || entry?.marketplaceId === marketplaceId
+        !marketplaceId ||
+        entry?.marketplaceId ===
+          marketplaceId
     ) ||
     summaries[0];
 
   return String(
     summary?.itemName ||
     summary?.title ||
-    item?.attributes?.item_name?.[0]?.value ||
+    item?.attributes?.item_name?.[0]
+      ?.value ||
     item?.amazon_title ||
     item?.title ||
     ""
   ).trim();
 }
-export function extractAmazonBrand(item, marketplaceId) {
-  const summaries = Array.isArray(item?.summaries) ? item.summaries : [];
+
+export function extractAmazonBrand(
+  item,
+  marketplaceId = null
+) {
+  const summaries =
+    Array.isArray(item?.summaries)
+      ? item.summaries
+      : [];
+
   const summary =
-    summaries.find((entry) => entry?.marketplaceId === marketplaceId) ||
+    summaries.find(
+      (entry) =>
+        !marketplaceId ||
+        entry?.marketplaceId ===
+          marketplaceId
+    ) ||
     summaries[0];
+
   return String(
-    summary?.brand || item?.attributes?.brand?.[0]?.value || ""
+    summary?.brand ||
+    item?.attributes?.brand?.[0]
+      ?.value ||
+    item?.brand ||
+    ""
   ).trim();
 }
 
-export function extractAmazonProductType(item, marketplaceId) {
-  const productTypes = Array.isArray(item?.productTypes) ? item.productTypes : [];
+export function extractAmazonProductType(
+  item,
+  marketplaceId = null
+) {
+  const productTypes =
+    Array.isArray(item?.productTypes)
+      ? item.productTypes
+      : [];
+
   const productType =
-    productTypes.find((entry) => entry?.marketplaceId === marketplaceId) ||
+    productTypes.find(
+      (entry) =>
+        !marketplaceId ||
+        entry?.marketplaceId ===
+          marketplaceId
+    ) ||
     productTypes[0];
-return String(
-  productType?.productType ||
-  item?.attributes?.product_type?.[0]?.value ||
-  item?.product_type ||
-  item?.amazon_product_type ||
-  ""
-).trim();
+
+  return String(
+    productType?.productType ||
+    item?.attributes?.product_type?.[0]
+      ?.value ||
+    item?.product_type ||
+    item?.amazon_product_type ||
+    item?.productType ||
+    ""
+  ).trim();
 }
 
-// ---------------------------------------------------------------------------
-// Apparel category normalization + conflict detection
-// ---------------------------------------------------------------------------
+function extractAmazonColor(item) {
+  return String(
+    item?.attributes?.color?.[0]?.value ||
+    item?.color ||
+    ""
+  ).trim();
+}
+
+function extractAmazonSize(item) {
+  return String(
+    item?.attributes?.size?.[0]?.value ||
+    item?.attributes?.size_name?.[0]
+      ?.value ||
+    item?.size ||
+    ""
+  ).trim();
+}
+
+function extractAmazonModelNumber(item) {
+  return String(
+    item?.attributes
+      ?.model_number?.[0]?.value ||
+    item?.attributes
+      ?.part_number?.[0]?.value ||
+    item?.modelNumber ||
+    item?.model_number ||
+    ""
+  ).trim();
+}
+
+/* =========================================================
+   APPAREL CATEGORY NORMALIZATION
+========================================================= */
 
 export function normalizeApparelCategory(value) {
   const text = normalizeText(value);
 
-  if (/\b(dress|gown|one piece|onepiece)\b/.test(text)) return "DRESS";
-  if (/\b(jumpsuit|romper|playsuit)\b/.test(text)) return "ONE_PIECE";
-  if (/\b(jeans|pants|trousers|leggings|shorts|joggers)\b/.test(text)) return "BOTTOM";
-  if (/\b(skirt)\b/.test(text)) return "SKIRT";
-  if (/\b(shirt|blouse|top|tee|t shirt|polo|hoodie|sweater)\b/.test(text)) return "TOP";
-  if (/\b(jacket|coat|blazer|cardigan)\b/.test(text)) return "OUTERWEAR";
-  if (/\b(shoe|boot|sneaker|sandal|heel)\b/.test(text)) return "FOOTWEAR";
+  if (
+    /\b(dress|gown|one piece|onepiece)\b/.test(
+      text
+    )
+  ) {
+    return "DRESS";
+  }
+
+  if (
+    /\b(jumpsuit|romper|playsuit)\b/.test(
+      text
+    )
+  ) {
+    return "ONE_PIECE";
+  }
+
+  if (
+    /\b(jeans|pants|trousers|leggings|shorts|joggers|bottoms)\b/.test(
+      text
+    )
+  ) {
+    return "BOTTOM";
+  }
+
+  if (/\bskirt\b/.test(text)) {
+    return "SKIRT";
+  }
+
+  if (
+    /\b(shirt|blouse|top|tee|t shirt|polo|hoodie|sweater|tank)\b/.test(
+      text
+    )
+  ) {
+    return "TOP";
+  }
+
+  if (
+    /\b(jacket|coat|blazer|cardigan|outerwear)\b/.test(
+      text
+    )
+  ) {
+    return "OUTERWEAR";
+  }
+
+  if (
+    /\b(shoe|boot|sneaker|sandal|heel|loafer|footwear)\b/.test(
+      text
+    )
+  ) {
+    return "FOOTWEAR";
+  }
+
+  if (
+    /\b(bra|panty|panties|lingerie|underwear)\b/.test(
+      text
+    )
+  ) {
+    return "INTIMATES";
+  }
+
+  if (
+    /\b(swimsuit|swimwear|bikini)\b/.test(
+      text
+    )
+  ) {
+    return "SWIMWEAR";
+  }
 
   return "UNKNOWN";
 }
 
-export function categoriesConflict(shopifyValue, amazonValue) {
-  const shopifyCategory = normalizeApparelCategory(shopifyValue);
-  const amazonCategory = normalizeApparelCategory(amazonValue);
+export function categoriesConflict(
+  shopifyValue,
+  amazonValue
+) {
+  const shopifyCategory =
+    normalizeApparelCategory(
+      shopifyValue
+    );
 
-  if (shopifyCategory === "UNKNOWN" || amazonCategory === "UNKNOWN") return false;
-  return shopifyCategory !== amazonCategory;
+  const amazonCategory =
+    normalizeApparelCategory(
+      amazonValue
+    );
+
+  if (
+    shopifyCategory === "UNKNOWN" ||
+    amazonCategory === "UNKNOWN"
+  ) {
+    return false;
+  }
+
+  return (
+    shopifyCategory !==
+    amazonCategory
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Text similarity (Jaccard over normalized tokens)
-// ---------------------------------------------------------------------------
+/* =========================================================
+   TEXT SIMILARITY
+========================================================= */
 
-export function calculateTextSimilarity(left, right) {
+export function calculateTextSimilarity(
+  left,
+  right
+) {
   const a = normalizeText(left);
   const b = normalizeText(right);
 
-  if (!a || !b) return 0;
-  if (a === b) return 100;
+  if (!a || !b) {
+    return 0;
+  }
 
-  const aTokens = new Set(a.split(" ").filter(Boolean));
-  const bTokens = new Set(b.split(" ").filter(Boolean));
+  if (a === b) {
+    return 100;
+  }
 
-  if (!aTokens.size || !bTokens.size) return 0;
+  const aTokens = new Set(
+    a.split(" ").filter(Boolean)
+  );
 
-  const intersection = [...aTokens].filter((token) => bTokens.has(token)).length;
-  const union = new Set([...aTokens, ...bTokens]).size;
+  const bTokens = new Set(
+    b.split(" ").filter(Boolean)
+  );
 
-  return Math.round((intersection / union) * 100);
+  if (
+    !aTokens.size ||
+    !bTokens.size
+  ) {
+    return 0;
+  }
+
+  const intersection = [
+    ...aTokens
+  ].filter(
+    (token) => bTokens.has(token)
+  ).length;
+
+  const union = new Set([
+    ...aTokens,
+    ...bTokens
+  ]).size;
+
+  return Math.round(
+    (intersection / union) *
+    100
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Candidate scoring
-// ---------------------------------------------------------------------------
+/* =========================================================
+   CANDIDATE SCORING
+========================================================= */
 
-export function scoreAmazonCandidate({ product, item, marketplaceId, inputIdentifiers = [] }) {
-  const amazonTitle = extractAmazonTitle(item, marketplaceId);
-  const amazonBrand = extractAmazonBrand(item, marketplaceId);
-  const amazonType = extractAmazonProductType(item, marketplaceId);
-  const amazonIdentifiers = extractAmazonIdentifiers(item);
+function collectInputIdentifiers(product = {}) {
+  const entries = [
+    ["ASIN", product?.asin],
+    ["ASIN", product?.amazon_asin],
+    ["UPC", product?.upc],
+    ["EAN", product?.ean],
+    ["GTIN", product?.gtin],
+    ["ISBN", product?.isbn],
+    ["JAN", product?.jan],
+    [product?.identifierType, product?.identifier],
+    ["BARCODE", product?.barcode]
+  ];
 
-  const normalizedInputs = inputIdentifiers.map(normalizeIdentifier).filter(Boolean);
+  return entries
+    .map(([type, value]) => ({
+      type: String(type || "")
+        .trim()
+        .toUpperCase(),
+      value:
+        normalizeIdentifier(value)
+    }))
+    .filter((entry) => entry.value);
+}
+
+export function scoreAmazonCandidate({
+  product = {},
+  item = {},
+  marketplaceId = null,
+  inputIdentifiers = []
+} = {}) {
+  const amazonTitle =
+    extractAmazonTitle(
+      item,
+      marketplaceId
+    );
+
+  const amazonBrand =
+    extractAmazonBrand(
+      item,
+      marketplaceId
+    );
+
+  const amazonType =
+    extractAmazonProductType(
+      item,
+      marketplaceId
+    );
+
+  const amazonColor =
+    extractAmazonColor(item);
+
+  const amazonSize =
+    extractAmazonSize(item);
+
+  const amazonModelNumber =
+    extractAmazonModelNumber(item);
+
+  const amazonIdentifiers =
+    extractAmazonIdentifiers(item);
+
+  const suppliedInputs = [
+    ...collectInputIdentifiers(product),
+    ...toArray(inputIdentifiers).map(
+      (value) => ({
+        type: "",
+        value:
+          normalizeIdentifier(value)
+      })
+    )
+  ].filter((entry) => entry.value);
 
   const matchedIdentifier =
-    normalizedInputs.length > 0
-      ? amazonIdentifiers.find((entry) => normalizedInputs.includes(entry.value))
+    suppliedInputs.length > 0
+      ? amazonIdentifiers.find(
+          (entry) =>
+            suppliedInputs.some(
+              (input) =>
+                input.value ===
+                entry.value
+            )
+        )
       : null;
 
-  const titleScore = calculateTextSimilarity(product?.title, amazonTitle);
-  const brandScore = calculateTextSimilarity(
-    product?.vendor || product?.brand,
-    amazonBrand
-  );
-  const typeScore = calculateTextSimilarity(
-    product?.productType || product?.category || product?.title,
-    `${amazonType} ${amazonTitle}`
-  );
+  const titleScore =
+    calculateTextSimilarity(
+      product?.title ||
+      product?.productTitle,
+      amazonTitle
+    );
+
+  const brandScore =
+    calculateTextSimilarity(
+      product?.vendor ||
+      product?.brand,
+      amazonBrand
+    );
+
+  const typeScore =
+    calculateTextSimilarity(
+      product?.productType ||
+      product?.product_type ||
+      product?.category ||
+      product?.title,
+      `${amazonType} ${amazonTitle}`
+    );
+
+  const colorScore =
+    product?.color && amazonColor
+      ? calculateTextSimilarity(
+          product.color,
+          amazonColor
+        )
+      : 0;
+
+  const sizeScore =
+    product?.size && amazonSize
+      ? calculateTextSimilarity(
+          product.size,
+          amazonSize
+        )
+      : 0;
+
+  const modelScore =
+    product?.modelNumber &&
+    amazonModelNumber
+      ? calculateTextSimilarity(
+          product.modelNumber,
+          amazonModelNumber
+        )
+      : 0;
 
   const brandConflict =
-    normalizeText(product?.vendor || product?.brand) &&
-    normalizeText(amazonBrand) &&
+    Boolean(
+      normalizeText(
+        product?.vendor ||
+        product?.brand
+      )
+    ) &&
+    Boolean(
+      normalizeText(amazonBrand)
+    ) &&
     brandScore < 30;
 
-  const productTypeConflict = categoriesConflict(
-    `${product?.productType || ""} ${product?.title || ""}`,
-    `${amazonType} ${amazonTitle}`
+  const productTypeConflict =
+    categoriesConflict(
+      `${
+        product?.productType ||
+        product?.product_type ||
+        ""
+      } ${product?.title || ""}`,
+      `${amazonType} ${amazonTitle}`
+    );
+
+  const colorConflict =
+    Boolean(
+      normalizeText(product?.color)
+    ) &&
+    Boolean(
+      normalizeText(amazonColor)
+    ) &&
+    colorScore < 40;
+
+  const sizeConflict =
+    Boolean(
+      normalizeText(product?.size)
+    ) &&
+    Boolean(
+      normalizeText(amazonSize)
+    ) &&
+    sizeScore < 40;
+
+  const modelConflict =
+    Boolean(
+      normalizeText(
+        product?.modelNumber ||
+        product?.model_number
+      )
+    ) &&
+    Boolean(
+      normalizeText(
+        amazonModelNumber
+      )
+    ) &&
+    modelScore < 50;
+
+  let confidence = Math.round(
+    titleScore * 0.55 +
+    brandScore * 0.2 +
+    typeScore * 0.15 +
+    colorScore * 0.04 +
+    sizeScore * 0.03 +
+    modelScore * 0.03
   );
 
-  let confidence = Math.round(titleScore * 0.65 + brandScore * 0.2 + typeScore * 0.15);
+  if (matchedIdentifier) {
+    confidence = Math.max(
+      confidence,
+      97
+    );
+  }
 
-  if (matchedIdentifier) confidence = Math.max(confidence, 95);
-  if (brandConflict) confidence -= 35;
-  if (productTypeConflict) confidence -= 45;
-  confidence = Math.max(0, Math.min(100, confidence));
+  if (brandConflict) {
+    confidence -= 35;
+  }
 
-  let status = "NO_SAFE_MATCH";
+  if (productTypeConflict) {
+    confidence -= 50;
+  }
 
-  if (matchedIdentifier && !brandConflict && !productTypeConflict) {
-    status = "IDENTIFIER_MATCH";
-  } else if (confidence >= 92 && titleScore >= 90 && !brandConflict && !productTypeConflict) {
-    status = "HIGH_CONFIDENCE_REVIEW";
-  } else if (confidence >= 75 && !productTypeConflict) {
-    status = "MANUAL_REVIEW";
+  if (colorConflict) {
+    confidence -= 15;
+  }
+
+  if (sizeConflict) {
+    confidence -= 15;
+  }
+
+  if (modelConflict) {
+    confidence -= 20;
+  }
+
+  confidence = Math.max(
+    0,
+    Math.min(100, confidence)
+  );
+
+  let status =
+    "NO_SAFE_MATCH";
+
+  if (
+    matchedIdentifier &&
+    !brandConflict &&
+    !productTypeConflict &&
+    !colorConflict &&
+    !sizeConflict &&
+    !modelConflict
+  ) {
+    status =
+      "IDENTIFIER_MATCH";
+  } else if (
+    confidence >= 92 &&
+    titleScore >= 88 &&
+    !brandConflict &&
+    !productTypeConflict &&
+    !colorConflict &&
+    !sizeConflict
+  ) {
+    status =
+      "HIGH_CONFIDENCE_REVIEW";
+  } else if (
+    confidence >= 75 &&
+    !productTypeConflict
+  ) {
+    status =
+      "MANUAL_REVIEW";
   }
 
   return {
-    asin: String(item?.asin || "").trim(),
+    asin:
+      String(item?.asin || "")
+        .trim()
+        .toUpperCase(),
     status,
     confidence,
-    safeToAutoLink: status === "IDENTIFIER_MATCH",
-    title: amazonTitle,
-    brand: amazonBrand,
-    productType: amazonType,
-    identifiers: amazonIdentifiers,
-    scores: { title: titleScore, brand: brandScore, productType: typeScore },
-    conflicts: { brand: Boolean(brandConflict), productType: Boolean(productTypeConflict) },
-    matchedIdentifier: matchedIdentifier || null,
-    rawItem: item,
+    safeToAutoLink:
+      status ===
+      "IDENTIFIER_MATCH",
+    title:
+      amazonTitle,
+    brand:
+      amazonBrand,
+    productType:
+      amazonType,
+    color:
+      amazonColor || null,
+    size:
+      amazonSize || null,
+    modelNumber:
+      amazonModelNumber || null,
+    identifiers:
+      amazonIdentifiers,
+    scores: {
+      title:
+        titleScore,
+      brand:
+        brandScore,
+      productType:
+        typeScore,
+      color:
+        colorScore,
+      size:
+        sizeScore,
+      modelNumber:
+        modelScore
+    },
+    conflicts: {
+      brand:
+        Boolean(brandConflict),
+      productType:
+        Boolean(
+          productTypeConflict
+        ),
+      color:
+        Boolean(colorConflict),
+      size:
+        Boolean(sizeConflict),
+      modelNumber:
+        Boolean(modelConflict)
+    },
+    matchedIdentifier:
+      matchedIdentifier || null,
+    rawItem:
+      item
   };
 }
 
-// ---------------------------------------------------------------------------
-// Best-match selection
-// ---------------------------------------------------------------------------
+/* =========================================================
+   BEST MATCH SELECTION
+========================================================= */
 
-export function chooseBestAmazonMatch(scoredMatches = []) {
-  const ordered = [...scoredMatches].sort(
-    (a, b) => b.confidence - a.confidence
+function isAlreadyScoredMatch(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof value.confidence ===
+      "number" &&
+    typeof value.status ===
+      "string"
+  );
+}
+
+function buildDecisionResponse(
+  scoredMatches,
+  options = {}
+) {
+  const ordered = [
+    ...scoredMatches
+  ].sort(
+    (a, b) =>
+      b.confidence -
+      a.confidence
   );
 
-  const identifierMatch = ordered.find(
-    (match) =>
-      match.status === "IDENTIFIER_MATCH" &&
-      match.safeToAutoLink
-  );
+  const minimumAutoMatchConfidence =
+    Number(
+      options.minimumAutoMatchConfidence ??
+      95
+    );
 
-  if (identifierMatch) return identifierMatch;
+  const minimumReviewConfidence =
+    Number(
+      options.minimumReviewConfidence ??
+      75
+    );
 
-  const highConfidenceReview = ordered.find(
-    (match) => match.status === "HIGH_CONFIDENCE_REVIEW"
-  );
+  const autoMatch =
+    ordered.find(
+      (match) =>
+        match.status ===
+          "IDENTIFIER_MATCH" &&
+        match.safeToAutoLink &&
+        match.confidence >=
+          minimumAutoMatchConfidence &&
+        match.asin
+    );
 
-  if (highConfidenceReview) return highConfidenceReview;
+  if (autoMatch) {
+    return {
+      version:
+        MATCHER_VERSION,
+      decision:
+        "AUTO_MATCH",
+      bestMatch:
+        autoMatch,
+      alternatives:
+        ordered
+          .filter(
+            (match) =>
+              match !== autoMatch
+          )
+          .slice(0, 5),
+      reason:
+        "A verified identifier matched an Amazon catalog item without brand, category, color, size, or model conflicts.",
+      confidence:
+        autoMatch.confidence,
+      safeToPublish:
+        true
+    };
+  }
 
-  const manualReview = ordered.find(
-    (match) => match.status === "MANUAL_REVIEW"
-  );
+  const reviewMatch =
+    ordered.find(
+      (match) =>
+        (
+          match.status ===
+            "HIGH_CONFIDENCE_REVIEW" ||
+          match.status ===
+            "MANUAL_REVIEW"
+        ) &&
+        match.confidence >=
+          minimumReviewConfidence &&
+        match.asin
+    );
 
-  if (manualReview) return manualReview;
+  if (reviewMatch) {
+    return {
+      version:
+        MATCHER_VERSION,
+      decision:
+        "NEEDS_REVIEW",
+      bestMatch:
+        reviewMatch,
+      alternatives:
+        ordered
+          .filter(
+            (match) =>
+              match !== reviewMatch
+          )
+          .slice(0, 5),
+      reason:
+        "A possible Amazon catalog match was found, but it is not safe for automatic linking.",
+      confidence:
+        reviewMatch.confidence,
+      safeToPublish:
+        false
+    };
+  }
 
   return {
-    status: "NO_SAFE_MATCH",
-    confidence: 0,
-    safeToAutoLink: false,
+    version:
+      MATCHER_VERSION,
+    decision:
+      "NO_SAFE_MATCH",
+    bestMatch:
+      null,
+    alternatives:
+      ordered.slice(0, 5),
+    reason:
+      ordered.length === 0
+        ? "Amazon returned no catalog candidates."
+        : "No candidate passed the safe matching rules.",
+    confidence:
+      ordered[0]?.confidence ||
+      0,
+    safeToPublish:
+      false
   };
 }
 
-// ---------------------------------------------------------------------------
-// Status constants
-// ---------------------------------------------------------------------------
+export function chooseBestAmazonMatch(
+  sourceProductOrScoredMatches = [],
+  catalogItems = [],
+  options = {}
+) {
+  if (
+    Array.isArray(
+      sourceProductOrScoredMatches
+    ) &&
+    sourceProductOrScoredMatches.every(
+      isAlreadyScoredMatch
+    )
+  ) {
+    return buildDecisionResponse(
+      sourceProductOrScoredMatches,
+      options
+    );
+  }
 
-export const MATCH_STATUSES = [
-  "IDENTIFIER_MATCH",
-  "HIGH_CONFIDENCE_REVIEW",
-  "MANUAL_REVIEW",
-  "NO_SAFE_MATCH",
-  "MISSING_IDENTIFIER",
-  "CATEGORY_CONFLICT",
-  "BRAND_CONFLICT",
-  "VARIANT_CONFLICT",
-  "SEARCH_ERROR",
-];
+  const sourceProduct =
+    sourceProductOrScoredMatches ||
+    {};
 
-export const MATCH_DECISIONS = ["PENDING", "APPROVED", "REJECTED", "NEEDS_NEW_SEARCH"];
+  const candidates =
+    Array.isArray(catalogItems)
+      ? catalogItems
+      : [];
+
+  const marketplaceId =
+    options.marketplaceId ||
+    sourceProduct?.marketplaceId ||
+    null;
+
+  const inputIdentifiers =
+    collectInputIdentifiers(
+      sourceProduct
+    ).map((entry) => entry.value);
+
+  const scoredMatches =
+    candidates.map((item) =>
+      scoreAmazonCandidate({
+        product:
+          sourceProduct,
+        item,
+        marketplaceId,
+        inputIdentifiers
+      })
+    );
+
+  return buildDecisionResponse(
+    scoredMatches,
+    options
+  );
+}
+
+export default chooseBestAmazonMatch;
