@@ -24,7 +24,7 @@ import {
 ========================================================= */
 
 const ENGINE_VERSION =
-  "amazon-engine-v3";
+  "amazon-engine-v3.1-compliance";
 
 const DEFAULT_MINIMUM_READY_SCORE = 85;
 
@@ -401,7 +401,11 @@ function createBaseResult(
       matchCount: 0,
       restrictions: [],
       eligible: null,
-      listingStatus: null
+      listingStatus: null,
+      matchMethod: null,
+      evidenceLevel: "NONE",
+      identifierProvenance: null,
+      requiresManualReview: false
     },
 
     issues: [],
@@ -1042,6 +1046,18 @@ async function checkExistingListing(
       result.amazon.eligible =
         true;
 
+      result.amazon.matchMethod =
+        "EXISTING_SELLER_LISTING";
+
+      result.amazon.evidenceLevel =
+        "VERIFIED";
+
+      result.amazon.identifierProvenance =
+        "AMAZON_SELLER_ACCOUNT";
+
+      result.amazon.requiresManualReview =
+        false;
+
       removeIssues(
         result,
         [
@@ -1118,6 +1134,18 @@ async function scanAmazonCatalogByIdentifier(
       catalog.matches[0],
       1
     );
+
+    result.amazon.matchMethod =
+      "EXACT_IDENTIFIER";
+
+    result.amazon.evidenceLevel =
+      "VERIFIED";
+
+    result.amazon.identifierProvenance =
+      "SHOPIFY_SUPPLIER_IDENTIFIER";
+
+    result.amazon.requiresManualReview =
+      false;
 
     return result;
   }
@@ -1198,31 +1226,21 @@ async function scanAmazonCatalogByKeywords(
     decision?.bestMatch ||
     null;
 
-  if (
-    decision?.decision ===
-      "AUTO_MATCH" &&
-    best?.asin
-  ) {
-    applyAmazonMatch(
-      result,
-      best,
-      items.length
-    );
-
-    removeIssues(
-      result,
-      [
-        "MISSING_UPC",
-        "INVALID_BARCODE_LENGTH"
-      ]
-    );
-
-    return result;
-  }
+  /*
+    Compliance rule:
+    Keyword, title, image, or public-web similarity is supporting evidence only.
+    It may suggest an ASIN for review, but it must never assign a UPC/GTIN or
+    make the product publish-ready without an exact verified identifier or an
+    existing seller listing.
+  */
 
   if (
-    decision?.decision ===
-      "NEEDS_REVIEW" &&
+    [
+      "AUTO_MATCH",
+      "NEEDS_REVIEW"
+    ].includes(
+      decision?.decision
+    ) &&
     best?.asin
   ) {
     result.amazon.asin =
@@ -1243,6 +1261,21 @@ async function scanAmazonCatalogByKeywords(
       best.product_type ||
       null;
 
+    result.amazon.matchMethod =
+      "KEYWORD_CANDIDATE";
+
+    result.amazon.evidenceLevel =
+      "SUPPORTING_ONLY";
+
+    result.amazon.identifierProvenance =
+      "AMAZON_CATALOG_KEYWORD_SEARCH";
+
+    result.amazon.requiresManualReview =
+      true;
+
+    result.amazon.matched =
+      false;
+
     result.issues.push({
       code:
         "AMAZON_KEYWORD_REVIEW",
@@ -1251,7 +1284,7 @@ async function scanAmazonCatalogByKeywords(
       message:
         `Amazon found a possible ASIN match with ${Math.round(
           Number(decision.confidence || best.confidence || 0)
-        )}% confidence.`
+        )}% confidence. Product identity and identifier ownership must be verified before publishing.`
     });
   }
 
@@ -1861,6 +1894,20 @@ export function getAmazonEngineDashboard() {
 
     summary:
       engineState.summary,
+
+    compliancePolicy: {
+      keywordMatchesAreAdvisoryOnly: true,
+      webFoundUpcsRequireVerification: true,
+      acceptedAutomaticEvidence: [
+        "EXISTING_SELLER_LISTING",
+        "EXACT_IDENTIFIER"
+      ],
+      prohibitedAutomaticActions: [
+        "GUESS_UPC",
+        "COPY_PRIVATE_LABEL_GTIN",
+        "AUTO_PUBLISH_KEYWORD_ONLY_MATCH"
+      ]
+    },
 
     highlights: {
       readyProducts,
