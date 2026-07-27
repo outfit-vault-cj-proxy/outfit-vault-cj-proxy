@@ -41,7 +41,9 @@ import {
 ========================================================= */
 
 const ROUTER_VERSION =
-  "amazon-engine-routes-v2";
+  "amazon-engine-routes-v3";
+
+const DEFAULT_MINIMUM_READY_SCORE = 85;
 
 const dailyPublisherState = {
   date: null,
@@ -606,9 +608,8 @@ export function createAmazonEngineRouter(
     "/dashboard",
     (req, res) => {
       try {
-        res.json(
-          getAmazonEngineDashboard()
-        );
+        const d=getAmazonEngineDashboard();
+        res.json({...d,version:ROUTER_VERSION});
       } catch (error) {
         sendError(
           res,
@@ -1144,7 +1145,7 @@ export function createAmazonEngineRouter(
                 "No locally eligible Shopify products were found.",
               requirements: [
                 "SKU",
-                "12, 13 or 14-digit barcode",
+                "8, 12, 13 or 14-digit barcode",
                 "Price greater than zero",
                 "Inventory greater than zero",
                 "Product image"
@@ -1206,8 +1207,8 @@ export function createAmazonEngineRouter(
           });
 
           if (
-            scan.status ===
-            "READY" &&
+            scan.readinessStatus ===
+            "AMAZON_READY" &&
             scan.amazon?.asin
           ) {
             selected = {
@@ -1385,8 +1386,9 @@ export function createAmazonEngineRouter(
             publishedQuantity:
               publishQuantity,
             readinessScore:
-              selected.scan
-                .readinessScore,
+              selected.scan.readinessScore,
+            readinessStatus:
+              selected.scan.readinessStatus,
             priorityScore:
               selected
                 .priorityScore,
