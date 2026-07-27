@@ -19,7 +19,9 @@ import {
 ========================================================= */
 
 const ENGINE_VERSION =
-  "amazon-engine-v1";
+  "amazon-engine-v2";
+
+const DEFAULT_MINIMUM_READY_SCORE = 85;
 
 /*
   Results are stored in memory for the first version.
@@ -57,6 +59,10 @@ function createEmptySummary() {
   return {
     products: 0,
     variants: 0,
+
+    amazonReady: 0,
+    notAmazonReady: 0,
+    publishEligible: 0,
 
     ready: 0,
     published: 0,
@@ -154,6 +160,12 @@ function getIdentifierType(
 ) {
   const length =
     barcode.length;
+
+  if (
+    length === 8
+  ) {
+    return "GTIN";
+  }
 
   if (
     length === 12
@@ -361,6 +373,18 @@ function createBaseResult(
     readinessScore:
       0,
 
+    readinessStatus:
+      "NOT_AMAZON_READY",
+
+    publishEligible:
+      false,
+
+    autoFixAvailable:
+      false,
+
+    autoFixActions:
+      [],
+
     amazon: {
       matched: false,
       asin: null,
@@ -458,7 +482,7 @@ function performLocalValidation(
       severity:
         "ERROR",
       message:
-        "Barcode must contain 12, 13 or 14 digits."
+        "Barcode must contain 8, 12, 13 or 14 digits."
     });
   }
 
@@ -484,7 +508,9 @@ function hasIssue(
 ========================================================= */
 
 function calculateReadinessScore(
-  result
+  result,
+  minimumScore =
+    DEFAULT_MINIMUM_READY_SCORE
 ) {
   let score = 100;
 
@@ -533,13 +559,128 @@ function calculateReadinessScore(
     score -= 40;
   }
 
-  return Math.max(
+  if (
+    result.error
+  ) {
+    score -= 30;
+  }
+
+  score = Math.max(
     0,
     Math.min(
       100,
       score
     )
   );
+
+  const hardBlocker =
+    !result.sku ||
+    result.price <= 0 ||
+    result.inventoryQuantity <= 0 ||
+    !result.image ||
+    !result.barcode ||
+    !result.identifierType ||
+    !result.amazon.matched ||
+    result.amazon.eligible === false ||
+    Boolean(result.error);
+
+  result.readinessStatus =
+    score >= minimumScore &&
+    !hardBlocker
+      ? "AMAZON_READY"
+      : "NOT_AMAZON_READY";
+
+  result.publishEligible =
+    result.readinessStatus ===
+    "AMAZON_READY";
+
+  return score;
+}
+
+/* =========================================================
+   AUTO-FIX RECOMMENDATIONS
+========================================================= */
+
+function buildAutoFixActions(
+  result
+) {
+  const recommendations = {
+    MISSING_SKU:
+      "Generate and save a unique seller SKU.",
+    MISSING_PRICE:
+      "Add a valid Shopify selling price.",
+    OUT_OF_STOCK:
+      "Increase Shopify inventory before publishing.",
+    MISSING_IMAGE:
+      "Add a primary product image.",
+    MISSING_UPC:
+      "Add the supplier's verified GS1 UPC, EAN or GTIN.",
+    INVALID_BARCODE_LENGTH:
+      "Replace the barcode with a valid 8, 12, 13 or 14 digit identifier.",
+    MULTIPLE_AMAZON_MATCHES:
+      "Review the Amazon candidates before approving an ASIN.",
+    AMAZON_SCAN_ERROR:
+      "Correct the Amazon API error and retry the scan."
+  };
+
+  const automaticCodes =
+    new Set([
+      "MISSING_SKU"
+    ]);
+
+  const actions =
+    result.issues.map(
+      (issue) => ({
+        code:
+          issue.code,
+        message:
+          issue.message,
+        recommendedAction:
+          recommendations[
+            issue.code
+          ] ||
+          "Review and correct the product data, then scan again.",
+        automatic:
+          automaticCodes.has(
+            issue.code
+          )
+      })
+    );
+
+  if (
+    !result.amazon.matched &&
+    result.barcode &&
+    result.identifierType
+  ) {
+    actions.push({
+      code:
+        "NO_AMAZON_MATCH",
+      message:
+        "Amazon did not return a safe catalog match.",
+      recommendedAction:
+        "Review catalog candidates or prepare a new Amazon catalog listing.",
+      automatic:
+        false
+    });
+  }
+
+  if (
+    result.amazon.eligible ===
+    false
+  ) {
+    actions.push({
+      code:
+        "AMAZON_RESTRICTED",
+      message:
+        "Amazon returned a listing restriction.",
+      recommendedAction:
+        "Request Amazon approval or choose an unrestricted product.",
+      automatic:
+        false
+    });
+  }
+
+  return actions;
 }
 
 /* =========================================================
@@ -778,7 +919,7 @@ async function scanAmazonCatalog(
     catalog.matches[0];
 
   result.amazon.matched =
-    true;
+    catalog.matches.length === 1;
 
   result.amazon.asin =
     match.asin ||
@@ -809,6 +950,9 @@ async function scanAmazonCatalog(
     catalog.matches.length >
     1
   ) {
+    result.amazon.matched =
+      false;
+
     result.issues.push({
       code:
         "MULTIPLE_AMAZON_MATCHES",
@@ -870,7 +1014,9 @@ export async function scanAmazonVariant(
 ) {
   const {
     checkPublished = true,
-    checkRestrictions = true
+    checkRestrictions = true,
+    minimumScore =
+      DEFAULT_MINIMUM_READY_SCORE
   } = options;
 
   const result =
@@ -928,12 +1074,24 @@ export async function scanAmazonVariant(
 
   result.readinessScore =
     calculateReadinessScore(
-      result
+      result,
+      minimumScore
     );
 
   classifyResult(
     result
   );
+
+  result.autoFixActions =
+    buildAutoFixActions(
+      result
+    );
+
+  result.autoFixAvailable =
+    result.autoFixActions.some(
+      (action) =>
+        action.automatic
+    );
 
   result.scannedAt =
     new Date()
@@ -974,6 +1132,21 @@ function calculateSummary(
       result.amazon.matched
     ) {
       summary.amazonMatches++;
+    }
+
+    if (
+      result.readinessStatus ===
+      "AMAZON_READY"
+    ) {
+      summary.amazonReady++;
+    } else {
+      summary.notAmazonReady++;
+    }
+
+    if (
+      result.publishEligible
+    ) {
+      summary.publishEligible++;
     }
 
     switch (
@@ -1083,6 +1256,8 @@ export async function startAmazonEngineScan(
     delayMs = 750,
     checkPublished = true,
     checkRestrictions = true,
+    minimumScore =
+      DEFAULT_MINIMUM_READY_SCORE,
     replaceExisting = true
   } = options;
 
@@ -1150,7 +1325,8 @@ export async function startAmazonEngineScan(
               variant,
               {
                 checkPublished,
-                checkRestrictions
+                checkRestrictions,
+                minimumScore
               }
             );
 
@@ -1325,8 +1501,8 @@ export function getAmazonEngineDashboard() {
     results
       .filter(
         (result) =>
-          result.status ===
-          "READY"
+          result.readinessStatus ===
+          "AMAZON_READY"
       )
       .sort(
         (a, b) =>
@@ -1353,6 +1529,16 @@ export function getAmazonEngineDashboard() {
       )
       .slice(0, 10);
 
+  const needsAiFix =
+    results
+      .filter(
+        (result) =>
+          result.readinessStatus ===
+          "NOT_AMAZON_READY" &&
+          result.autoFixAvailable
+      )
+      .slice(0, 10);
+
   return {
     success: true,
 
@@ -1367,6 +1553,7 @@ export function getAmazonEngineDashboard() {
 
     highlights: {
       readyProducts,
+      needsAiFix,
       needsUpc,
       restricted
     }
@@ -1390,13 +1577,18 @@ export function getAmazonEngineResults(
     );
 
   if (status) {
+    const normalizedStatus =
+      String(status)
+        .trim()
+        .toUpperCase();
+
     results =
       results.filter(
         (result) =>
           result.status ===
-          String(status)
-            .trim()
-            .toUpperCase()
+            normalizedStatus ||
+          result.readinessStatus ===
+            normalizedStatus
       );
   }
 
