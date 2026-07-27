@@ -2,9 +2,14 @@
 
 import {
   searchCatalogByIdentifier,
+  searchCatalogItems,
   getListingRestrictions,
   getListingStatus
 } from "./amazon.js";
+
+import {
+  chooseBestAmazonMatch
+} from "./amazonMatcher.js";
 
 /* =========================================================
    AMAZON PUBLISHING ENGINE
@@ -19,7 +24,7 @@ import {
 ========================================================= */
 
 const ENGINE_VERSION =
-  "amazon-engine-v2";
+  "amazon-engine-v3";
 
 const DEFAULT_MINIMUM_READY_SCORE = 85;
 
@@ -503,6 +508,119 @@ function hasIssue(
   );
 }
 
+function removeIssues(
+  result,
+  codes
+) {
+  const blockedCodes =
+    new Set(codes);
+
+  result.issues =
+    result.issues.filter(
+      (issue) =>
+        !blockedCodes.has(
+          issue.code
+        )
+    );
+
+  return result;
+}
+
+function buildKeywordSearchText(
+  result
+) {
+  return [
+    result.vendor,
+    result.productType,
+    result.productTitle,
+    result.variantTitle,
+    result.color,
+    result.size,
+    result.sku
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function buildMatcherProduct(
+  result
+) {
+  return {
+    id:
+      result.shopify_product_id,
+    title:
+      result.productTitle ||
+      result.variantTitle,
+    productTitle:
+      result.productTitle,
+    variantTitle:
+      result.variantTitle,
+    vendor:
+      result.vendor,
+    brand:
+      result.vendor,
+    productType:
+      result.productType,
+    color:
+      result.color,
+    size:
+      result.size,
+    sku:
+      result.sku,
+    barcode:
+      result.barcode
+  };
+}
+
+function applyAmazonMatch(
+  result,
+  match,
+  matchCount = 1
+) {
+  if (!match) {
+    return result;
+  }
+
+  result.amazon.matched =
+    true;
+
+  result.amazon.asin =
+    match.asin ||
+    null;
+
+  result.amazon.title =
+    match.title ||
+    match.amazon_title ||
+    null;
+
+  result.amazon.brand =
+    match.brand ||
+    match.amazon_brand ||
+    null;
+
+  result.amazon.manufacturer =
+    match.manufacturer ||
+    null;
+
+  result.amazon.productType =
+    match.productType ||
+    match.product_type ||
+    null;
+
+  result.amazon.image =
+    match.image ||
+    extractAmazonImage(match) ||
+    null;
+
+  result.amazon.matchCount =
+    matchCount;
+
+  return result;
+}
+
 /* =========================================================
    READINESS SCORE
 ========================================================= */
@@ -512,6 +630,18 @@ function calculateReadinessScore(
   minimumScore =
     DEFAULT_MINIMUM_READY_SCORE
 ) {
+  if (
+    result.amazon.listingStatus ===
+    "PUBLISHED"
+  ) {
+    result.readinessStatus =
+      "AMAZON_READY";
+
+    result.publishEligible =
+      true;
+
+    return 100;
+  }
   let score = 100;
 
   if (!result.sku) {
@@ -619,6 +749,8 @@ function buildAutoFixActions(
       "Replace the barcode with a valid 8, 12, 13 or 14 digit identifier.",
     MULTIPLE_AMAZON_MATCHES:
       "Review the Amazon candidates before approving an ASIN.",
+    AMAZON_KEYWORD_REVIEW:
+      "Review the suggested Amazon ASIN before approving it.",
     AMAZON_SCAN_ERROR:
       "Correct the Amazon API error and retry the scan."
   };
@@ -733,6 +865,19 @@ function classifyResult(
   }
 
   if (
+    result.amazon.listingStatus ===
+    "PUBLISHED"
+  ) {
+    result.status =
+      "PUBLISHED";
+
+    result.recommendation =
+      "Listing already exists in the Amazon seller account.";
+
+    return result;
+  }
+
+  if (
     hasIssue(
       result,
       "INVALID_BARCODE_LENGTH"
@@ -743,6 +888,21 @@ function classifyResult(
 
     result.recommendation =
       "Correct the barcode stored in Shopify.";
+
+    return result;
+  }
+
+  if (
+    hasIssue(
+      result,
+      "AMAZON_KEYWORD_REVIEW"
+    )
+  ) {
+    result.status =
+      "NEEDS_REVIEW";
+
+    result.recommendation =
+      "Review the suggested Amazon ASIN before approving publication.";
 
     return result;
   }
@@ -783,19 +943,6 @@ function classifyResult(
 
     result.recommendation =
       "Amazon approval or additional documentation is required.";
-
-    return result;
-  }
-
-  if (
-    result.amazon.listingStatus ===
-    "PUBLISHED"
-  ) {
-    result.status =
-      "PUBLISHED";
-
-    result.recommendation =
-      "Listing already exists in the Amazon seller account.";
 
     return result;
   }
@@ -852,11 +999,58 @@ async function checkExistingListing(
     if (
       listing.success
     ) {
+      const data =
+        listing.data ||
+        {};
+
+      const summary =
+        data.summaries?.[0] ||
+        {};
+
+      const asin =
+        summary.asin ||
+        data.identifiers?.find(
+          (entry) =>
+            entry?.asin
+        )?.asin ||
+        data.asin ||
+        null;
+
       result.amazon.listingStatus =
         "PUBLISHED";
 
       result.amazon.existingListing =
-        listing.data;
+        data;
+
+      result.amazon.matched =
+        true;
+
+      result.amazon.asin =
+        asin ||
+        result.amazon.asin;
+
+      result.amazon.title =
+        summary.itemName ||
+        summary.itemNameByMarketplace?.[0]?.itemName ||
+        result.amazon.title;
+
+      result.amazon.productType =
+        summary.productType ||
+        data.productType ||
+        result.amazon.productType;
+
+      result.amazon.eligible =
+        true;
+
+      removeIssues(
+        result,
+        [
+          "MISSING_UPC",
+          "INVALID_BARCODE_LENGTH",
+          "NO_AMAZON_MATCH",
+          "MULTIPLE_AMAZON_MATCHES"
+        ]
+      );
     } else if (
       listing.status === 404
     ) {
@@ -878,7 +1072,7 @@ async function checkExistingListing(
    AMAZON CATALOG SCAN
 ========================================================= */
 
-async function scanAmazonCatalog(
+async function scanAmazonCatalogByIdentifier(
   result
 ) {
   if (
@@ -899,7 +1093,7 @@ async function scanAmazonCatalog(
   ) {
     throw new Error(
       catalog.error ||
-      "Amazon catalog search failed"
+      "Amazon catalog identifier search failed"
     );
   }
 
@@ -915,51 +1109,149 @@ async function scanAmazonCatalog(
     return result;
   }
 
-  const match =
-    catalog.matches[0];
+  if (
+    catalog.matches.length ===
+    1
+  ) {
+    applyAmazonMatch(
+      result,
+      catalog.matches[0],
+      1
+    );
 
-  result.amazon.matched =
-    catalog.matches.length === 1;
+    return result;
+  }
 
-  result.amazon.asin =
-    match.asin ||
-    null;
+  result.issues.push({
+    code:
+      "MULTIPLE_AMAZON_MATCHES",
+    severity:
+      "REVIEW",
+    message:
+      `Amazon returned ${catalog.matches.length} matches for this identifier.`
+  });
 
-  result.amazon.title =
-    match.title ||
-    null;
+  return result;
+}
 
-  result.amazon.brand =
-    match.brand ||
-    null;
+async function scanAmazonCatalogByKeywords(
+  result
+) {
+  const keywords =
+    buildKeywordSearchText(
+      result
+    );
 
-  result.amazon.manufacturer =
-    match.manufacturer ||
-    null;
+  if (!keywords) {
+    return result;
+  }
 
-  result.amazon.productType =
-    match.productType ||
-    null;
+  const catalog =
+    await searchCatalogItems({
+      keywords,
+      brandNames:
+        result.vendor ||
+        ""
+    });
 
-  result.amazon.image =
-    extractAmazonImage(
-      match
+  if (
+    !catalog.success
+  ) {
+    throw new Error(
+      catalog.error ||
+      "Amazon catalog keyword search failed"
+    );
+  }
+
+  const items =
+    catalog.items ||
+    [];
+
+  result.amazon.matchCount =
+    Math.max(
+      result.amazon.matchCount ||
+      0,
+      items.length
     );
 
   if (
-    catalog.matches.length >
-    1
+    items.length === 0
   ) {
-    result.amazon.matched =
-      false;
+    return result;
+  }
+
+  const decision =
+    chooseBestAmazonMatch(
+      buildMatcherProduct(
+        result
+      ),
+      items,
+      {
+        minimumAutoMatchConfidence:
+          95,
+        minimumReviewConfidence:
+          75
+      }
+    );
+
+  const best =
+    decision?.bestMatch ||
+    null;
+
+  if (
+    decision?.decision ===
+      "AUTO_MATCH" &&
+    best?.asin
+  ) {
+    applyAmazonMatch(
+      result,
+      best,
+      items.length
+    );
+
+    removeIssues(
+      result,
+      [
+        "MISSING_UPC",
+        "INVALID_BARCODE_LENGTH"
+      ]
+    );
+
+    return result;
+  }
+
+  if (
+    decision?.decision ===
+      "NEEDS_REVIEW" &&
+    best?.asin
+  ) {
+    result.amazon.asin =
+      best.asin;
+
+    result.amazon.title =
+      best.title ||
+      best.amazon_title ||
+      null;
+
+    result.amazon.brand =
+      best.brand ||
+      best.amazon_brand ||
+      null;
+
+    result.amazon.productType =
+      best.productType ||
+      best.product_type ||
+      null;
 
     result.issues.push({
       code:
-        "MULTIPLE_AMAZON_MATCHES",
+        "AMAZON_KEYWORD_REVIEW",
       severity:
         "REVIEW",
       message:
-        `Amazon returned ${catalog.matches.length} matches for this identifier.`
+        `Amazon found a possible ASIN match with ${Math.round(
+          Number(decision.confidence || best.confidence || 0)
+        )}% confidence.`
     });
   }
 
@@ -1028,32 +1320,51 @@ export async function scanAmazonVariant(
 
   try {
     /*
-      Products without barcodes stay in the UPC queue.
-      We do not waste Amazon API calls on them.
+      Existing seller listings must be checked first.
+      An already-listed SKU does not require another UPC.
     */
 
     if (
-      result.barcode &&
-      result.identifierType
+      checkPublished &&
+      result.sku
     ) {
-      await scanAmazonCatalog(
+      await checkExistingListing(
         result
       );
+    }
+
+    if (
+      result.amazon.listingStatus !==
+      "PUBLISHED"
+    ) {
+      if (
+        result.barcode &&
+        result.identifierType
+      ) {
+        await scanAmazonCatalogByIdentifier(
+          result
+        );
+      }
+
+      /*
+        If the identifier is missing, invalid, or returned no safe match,
+        search Amazon by product title, brand, category, color, size and SKU.
+      */
 
       if (
-        result.amazon.matched &&
-        checkRestrictions
+        !result.amazon.matched
       ) {
-        await scanRestrictions(
+        await scanAmazonCatalogByKeywords(
           result
         );
       }
 
       if (
-        checkPublished &&
-        result.sku
+        result.amazon.matched &&
+        result.amazon.asin &&
+        checkRestrictions
       ) {
-        await checkExistingListing(
+        await scanRestrictions(
           result
         );
       }
