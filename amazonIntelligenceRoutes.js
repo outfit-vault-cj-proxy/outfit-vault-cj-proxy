@@ -1,171 +1,350 @@
-/* eslint-env node / / global process */
+/* eslint-env node */
+/* global process */
 
-import express from “express”; import { analyzeAmazonReadiness } from
-“./amazonIntelligenceEngine.js”;
+import express from "express";
+import { analyzeAmazonReadiness } from "./amazonIntelligenceEngine.js";
 
-const ROUTER_VERSION = “amazon-intelligence-routes-v3”; const
-DEFAULT_MAX_VARIANTS = 5000; const DEFAULT_DELAY_MS = 100; const
-DEFAULT_MINIMUM_SCORE = 85; const DEFAULT_SCAN_TIMEOUT_MS = 30 * 60 *
-1000;
+const ROUTER_VERSION = "amazon-intelligence-routes-v3";
+const DEFAULT_MAX_VARIANTS = 5000;
+const DEFAULT_DELAY_MS = 100;
+const DEFAULT_MINIMUM_SCORE = 85;
+const DEFAULT_SCAN_TIMEOUT_MS = 30 * 60 * 1000;
 
-const intelligenceState = { status: “IDLE”, runId: null, runType: null,
-startedAt: null, completedAt: null, sourceVariants: 0, totalVariants: 0,
-processedVariants: 0, variantSource: null, productId: null, maxVariants:
-null, delayMs: null, minimumScore: null, error: null, report: null };
-
-/* ========================================================= RESPONSE
-HELPERS ========================================================= */
-
-function sendError(res, status, error, extra = {}) { return
-res.status(status).json({ success: false, error: error instanceof Error
-? error.message : String(error), …extra }); }
-
-function normalizeNumber( value, fallback, minimum = null, maximum =
-null ) { const number = Number(value);
-
-if (!Number.isFinite(number)) { return fallback; }
-
-let normalized = number;
-
-if (minimum !== null) { normalized = Math.max(minimum, normalized); }
-
-if (maximum !== null) { normalized = Math.min(maximum, normalized); }
-
-return normalized; }
-
-function normalizeBoolean(value, fallback) { if ( value === undefined ||
-value === null || value === “” ) { return fallback; }
-
-if (typeof value === “boolean”) { return value; }
-
-const normalized = String(value) .trim() .toLowerCase();
-
-if ( [“true”, “1”, “yes”, “on”].includes(normalized) ) { return true; }
-
-if ( [“false”, “0”, “no”, “off”].includes(normalized) ) { return false;
-}
-
-return fallback; }
-
-function extractVariants(data) { if (Array.isArray(data)) { return data;
-}
-
-if (Array.isArray(data?.variants)) { return data.variants; }
-
-if (Array.isArray(data?.data?.variants)) { return data.data.variants; }
-
-return []; }
-
-function createRunId(prefix = “amazon-intelligence”) { return [ prefix,
-Date.now().toString(36), Math.random().toString(36).slice(2, 10)
-].join(“-”); }
-
-function elapsedMs() { if (!intelligenceState.startedAt) { return 0; }
-
-const start = new Date(intelligenceState.startedAt).getTime();
-
-const end = intelligenceState.completedAt ? new
-Date(intelligenceState.completedAt).getTime() : Date.now();
-
-return Math.max(0, end - start); }
-
-function stateResponse() { return { success: true, version:
-ROUTER_VERSION, status: intelligenceState.status, runId:
-intelligenceState.runId, runType: intelligenceState.runType, startedAt:
-intelligenceState.startedAt, completedAt: intelligenceState.completedAt,
-elapsedMs: elapsedMs(), sourceVariants:
-intelligenceState.sourceVariants, totalVariants:
-intelligenceState.totalVariants, processedVariants:
-intelligenceState.processedVariants, variantSource:
-intelligenceState.variantSource, productId: intelligenceState.productId,
-maxVariants: intelligenceState.maxVariants, delayMs:
-intelligenceState.delayMs, minimumScore: intelligenceState.minimumScore,
-error: intelligenceState.error, hasReport:
-Boolean(intelligenceState.report), statusUrl:
-“/amazon-intelligence/status”, reportUrl: “/amazon-intelligence/report”
-}; }
+const intelligenceState = {
+  status: "IDLE",
+  runId: null,
+  runType: null,
+  startedAt: null,
+  completedAt: null,
+  sourceVariants: 0,
+  totalVariants: 0,
+  processedVariants: 0,
+  variantSource: null,
+  productId: null,
+  maxVariants: null,
+  delayMs: null,
+  minimumScore: null,
+  error: null,
+  report: null
+};
 
 /* =========================================================
-AUTHENTICATION =========================================================
-*/
-
-function getProvidedAdminKey(req) { const directKey =
-req.headers[“x-admin-key”] || req.headers[“x-auth-secret”];
-
-if (directKey) { return String(directKey).trim(); }
-
-const authorization = String( req.headers.authorization || “” ).trim();
-
-if ( authorization .toLowerCase() .startsWith(“bearer”) ) { return
-authorization.slice(7).trim(); }
-
-return ““; }
-
-function getConfiguredAdminKey() { return String(
-process.env.ADMIN_API_KEY || process.env.AMAZON_AUTH_SECRET || “”
-).trim(); }
-
-function requireAdmin(req, res, next) { const configuredKey =
-getConfiguredAdminKey();
-
-if (!configuredKey) { return sendError( res, 503, “ADMIN_API_KEY or
-AMAZON_AUTH_SECRET is not configured. Amazon Intelligence is disabled.”
-); }
-
-if ( getProvidedAdminKey(req) !== configuredKey ) { return sendError(
-res, 401, “Administrator authorization is required.” ); }
-
-next(); }
-
-/* ========================================================= RUN STATE
+   RESPONSE HELPERS
 ========================================================= */
 
-function beginRun({ runId, runType, sourceVariants, totalVariants,
-variantSource, productId, maxVariants, delayMs, minimumScore }) {
-intelligenceState.status = “RUNNING”; intelligenceState.runId = runId;
-intelligenceState.runType = runType; intelligenceState.startedAt = new
-Date().toISOString(); intelligenceState.completedAt = null;
-intelligenceState.sourceVariants = sourceVariants;
-intelligenceState.totalVariants = totalVariants;
-intelligenceState.processedVariants = 0; intelligenceState.variantSource
-= variantSource; intelligenceState.productId = productId || null;
-intelligenceState.maxVariants = maxVariants; intelligenceState.delayMs =
-delayMs; intelligenceState.minimumScore = minimumScore;
-intelligenceState.error = null; intelligenceState.report = null; }
+function sendError(res, status, error, extra = {}) {
+  return res.status(status).json({
+    success: false,
+    error: error instanceof Error ? error.message : String(error),
+    ...extra
+  });
+}
 
-function completeRun(runId, report) { if ( intelligenceState.runId !==
-runId ) { return; }
+function normalizeNumber(
+  value,
+  fallback,
+  minimum = null,
+  maximum = null
+) {
+  const number = Number(value);
 
-intelligenceState.report = report; intelligenceState.status =
-“COMPLETED”; intelligenceState.processedVariants = Number(
-report?.receivedVariants || report?.reports?.length ||
-intelligenceState.totalVariants ); intelligenceState.completedAt = new
-Date().toISOString(); intelligenceState.error = null; }
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
 
-function failRun(runId, error) { if ( runId && intelligenceState.runId
-!== runId ) { return; }
+  let normalized = number;
 
-intelligenceState.status = “FAILED”; intelligenceState.error = error
-instanceof Error ? error.message : String(error);
-intelligenceState.completedAt = new Date().toISOString(); }
+  if (minimum !== null) {
+    normalized = Math.max(minimum, normalized);
+  }
 
-function withTimeout( promise, timeoutMs, label ) { let timeoutId;
+  if (maximum !== null) {
+    normalized = Math.min(maximum, normalized);
+  }
 
-const timeout = new Promise( (_, reject) => { timeoutId = setTimeout( ()
-=> { reject( new Error( ${label} exceeded ${timeoutMs}ms. ) ); },
-timeoutMs ); } );
+  return normalized;
+}
 
-return Promise .race([promise, timeout]) .finally(() => {
-clearTimeout(timeoutId); }); }
+function normalizeBoolean(value, fallback) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return fallback;
+  }
 
-/* ========================================================= BINARY
-READINESS ========================================================= */
+  if (typeof value === "boolean") {
+    return value;
+  }
 
-function buildAutoFixActions(report) { const blockers = Array.isArray(
-report?.blockers ) ? report.blockers : [];
+  const normalized = String(value)
+    .trim()
+    .toLowerCase();
 
-return blockers.map((blocker) => { const code = String( blocker?.code ||
-“UNKNOWN” );
+  if (
+    ["true", "1", "yes", "on"].includes(normalized)
+  ) {
+    return true;
+  }
+
+  if (
+    ["false", "0", "no", "off"].includes(normalized)
+  ) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function extractVariants(data) {
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  if (Array.isArray(data?.variants)) {
+    return data.variants;
+  }
+
+  if (Array.isArray(data?.data?.variants)) {
+    return data.data.variants;
+  }
+
+  return [];
+}
+
+function createRunId(prefix = "amazon-intelligence") {
+  return [
+    prefix,
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10)
+  ].join("-");
+}
+
+function elapsedMs() {
+  if (!intelligenceState.startedAt) {
+    return 0;
+  }
+
+  const start =
+    new Date(intelligenceState.startedAt).getTime();
+
+  const end =
+    intelligenceState.completedAt
+      ? new Date(intelligenceState.completedAt).getTime()
+      : Date.now();
+
+  return Math.max(0, end - start);
+}
+
+function stateResponse() {
+  return {
+    success: true,
+    version: ROUTER_VERSION,
+    status: intelligenceState.status,
+    runId: intelligenceState.runId,
+    runType: intelligenceState.runType,
+    startedAt: intelligenceState.startedAt,
+    completedAt: intelligenceState.completedAt,
+    elapsedMs: elapsedMs(),
+    sourceVariants: intelligenceState.sourceVariants,
+    totalVariants: intelligenceState.totalVariants,
+    processedVariants: intelligenceState.processedVariants,
+    variantSource: intelligenceState.variantSource,
+    productId: intelligenceState.productId,
+    maxVariants: intelligenceState.maxVariants,
+    delayMs: intelligenceState.delayMs,
+    minimumScore: intelligenceState.minimumScore,
+    error: intelligenceState.error,
+    hasReport: Boolean(intelligenceState.report),
+    statusUrl: "/amazon-intelligence/status",
+    reportUrl: "/amazon-intelligence/report"
+  };
+}
+
+/* =========================================================
+   AUTHENTICATION
+========================================================= */
+
+function getProvidedAdminKey(req) {
+  const directKey =
+    req.headers["x-admin-key"] ||
+    req.headers["x-auth-secret"];
+
+  if (directKey) {
+    return String(directKey).trim();
+  }
+
+  const authorization = String(
+    req.headers.authorization || ""
+  ).trim();
+
+  if (
+    authorization
+      .toLowerCase()
+      .startsWith("bearer ")
+  ) {
+    return authorization.slice(7).trim();
+  }
+
+  return "";
+}
+
+function getConfiguredAdminKey() {
+  return String(
+    process.env.ADMIN_API_KEY ||
+    process.env.AMAZON_AUTH_SECRET ||
+    ""
+  ).trim();
+}
+
+function requireAdmin(req, res, next) {
+  const configuredKey =
+    getConfiguredAdminKey();
+
+  if (!configuredKey) {
+    return sendError(
+      res,
+      503,
+      "ADMIN_API_KEY or AMAZON_AUTH_SECRET is not configured. Amazon Intelligence is disabled."
+    );
+  }
+
+  if (
+    getProvidedAdminKey(req) !==
+    configuredKey
+  ) {
+    return sendError(
+      res,
+      401,
+      "Administrator authorization is required."
+    );
+  }
+
+  next();
+}
+
+/* =========================================================
+   RUN STATE
+========================================================= */
+
+function beginRun({
+  runId,
+  runType,
+  sourceVariants,
+  totalVariants,
+  variantSource,
+  productId,
+  maxVariants,
+  delayMs,
+  minimumScore
+}) {
+  intelligenceState.status = "RUNNING";
+  intelligenceState.runId = runId;
+  intelligenceState.runType = runType;
+  intelligenceState.startedAt =
+    new Date().toISOString();
+  intelligenceState.completedAt = null;
+  intelligenceState.sourceVariants =
+    sourceVariants;
+  intelligenceState.totalVariants =
+    totalVariants;
+  intelligenceState.processedVariants = 0;
+  intelligenceState.variantSource =
+    variantSource;
+  intelligenceState.productId =
+    productId || null;
+  intelligenceState.maxVariants =
+    maxVariants;
+  intelligenceState.delayMs =
+    delayMs;
+  intelligenceState.minimumScore =
+    minimumScore;
+  intelligenceState.error = null;
+  intelligenceState.report = null;
+}
+
+function completeRun(runId, report) {
+  if (
+    intelligenceState.runId !== runId
+  ) {
+    return;
+  }
+
+  intelligenceState.report = report;
+  intelligenceState.status = "COMPLETED";
+  intelligenceState.processedVariants =
+    Number(
+      report?.receivedVariants ||
+      report?.reports?.length ||
+      intelligenceState.totalVariants
+    );
+  intelligenceState.completedAt =
+    new Date().toISOString();
+  intelligenceState.error = null;
+}
+
+function failRun(runId, error) {
+  if (
+    runId &&
+    intelligenceState.runId !== runId
+  ) {
+    return;
+  }
+
+  intelligenceState.status = "FAILED";
+  intelligenceState.error =
+    error instanceof Error
+      ? error.message
+      : String(error);
+  intelligenceState.completedAt =
+    new Date().toISOString();
+}
+
+function withTimeout(
+  promise,
+  timeoutMs,
+  label
+) {
+  let timeoutId;
+
+  const timeout = new Promise(
+    (_, reject) => {
+      timeoutId = setTimeout(
+        () => {
+          reject(
+            new Error(
+              `${label} exceeded ${timeoutMs}ms.`
+            )
+          );
+        },
+        timeoutMs
+      );
+    }
+  );
+
+  return Promise
+    .race([promise, timeout])
+    .finally(() => {
+      clearTimeout(timeoutId);
+    });
+}
+
+/* =========================================================
+   BINARY READINESS
+========================================================= */
+
+function buildAutoFixActions(report) {
+  const blockers = Array.isArray(
+    report?.blockers
+  )
+    ? report.blockers
+    : [];
+
+  return blockers.map((blocker) => {
+    const code = String(
+      blocker?.code || "UNKNOWN"
+    );
 
     const actions = {
       MISSING_BARCODE:
@@ -204,12 +383,19 @@ return blockers.map((blocker) => { const code = String( blocker?.code ||
           "INCOMPLETE_VARIATION_OPTIONS"
         ].includes(code)
     };
+  });
+}
 
-}); }
-
-function applyBinaryReadiness( report, minimumScore ) { const reports =
-Array.isArray( report?.reports ) ? report.reports.map((entry) => { const
-scanReady = entry?.scan?.status === “READY”;
+function applyBinaryReadiness(
+  report,
+  minimumScore
+) {
+  const reports = Array.isArray(
+    report?.reports
+  )
+    ? report.reports.map((entry) => {
+        const scanReady =
+          entry?.scan?.status === "READY";
 
         const scoreReady =
           Number(entry?.amazonReadyScore || 0) >=
@@ -244,27 +430,49 @@ scanReady = entry?.scan?.status === “READY”;
       })
     : [];
 
-const amazonReady = reports.filter( (entry) => entry.readinessStatus ===
-“AMAZON_READY” ).length;
+  const amazonReady =
+    reports.filter(
+      (entry) =>
+        entry.readinessStatus ===
+        "AMAZON_READY"
+    ).length;
 
-const notAmazonReady = reports.length - amazonReady;
+  const notAmazonReady =
+    reports.length - amazonReady;
 
-return { …report, decisionModel: “BINARY_READINESS”, publishPolicy:
-“Only products with readinessStatus AMAZON_READY are eligible for
-publishing.”, minimumReadyScore: minimumScore, summary: {
-…(report?.summary || {}), total: reports.length, amazonReady,
-notAmazonReady }, reports }; }
+  return {
+    ...report,
+    decisionModel: "BINARY_READINESS",
+    publishPolicy:
+      "Only products with readinessStatus AMAZON_READY are eligible for publishing.",
+    minimumReadyScore: minimumScore,
+    summary: {
+      ...(report?.summary || {}),
+      total: reports.length,
+      amazonReady,
+      notAmazonReady
+    },
+    reports
+  };
+}
 
-/* ========================================================= ROUTER
+/* =========================================================
+   ROUTER
 ========================================================= */
 
-export function createAmazonIntelligenceRouter( dependencies = {} ) {
-const router = express.Router();
+export function createAmazonIntelligenceRouter(
+  dependencies = {}
+) {
+  const router = express.Router();
 
-const { getShopifyVariants, onAnalysisComplete } = dependencies;
+  const {
+    getShopifyVariants,
+    onAnalysisComplete
+  } = dependencies;
 
-async function loadVariants(req) { let variants =
-extractVariants(req.body);
+  async function loadVariants(req) {
+    let variants =
+      extractVariants(req.body);
 
     if (variants.length > 0) {
       return {
@@ -299,13 +507,24 @@ extractVariants(req.body);
       variants,
       source: "shopify"
     };
+  }
 
-}
-
-function getOptions( req, defaults = {} ) { return { maxVariants:
-Math.floor( normalizeNumber( req.body?.maxVariants ??
-req.query?.maxVariants, defaults.maxVariants ?? DEFAULT_MAX_VARIANTS, 1,
-5000 ) ),
+  function getOptions(
+    req,
+    defaults = {}
+  ) {
+    return {
+      maxVariants:
+        Math.floor(
+          normalizeNumber(
+            req.body?.maxVariants ??
+            req.query?.maxVariants,
+            defaults.maxVariants ??
+            DEFAULT_MAX_VARIANTS,
+            1,
+            5000
+          )
+        ),
 
       delayMs:
         Math.floor(
@@ -364,11 +583,14 @@ req.query?.maxVariants, defaults.maxVariants ?? DEFAULT_MAX_VARIANTS, 1,
         req.body?.profitability ||
         {}
     };
+  }
 
-}
-
-async function prepareScan( req, defaults = {} ) { const loaded = await
-loadVariants(req);
+  async function prepareScan(
+    req,
+    defaults = {}
+  ) {
+    const loaded =
+      await loadVariants(req);
 
     const sourceVariants =
       loaded.variants.length;
@@ -399,12 +621,21 @@ loadVariants(req);
         null,
       options
     };
+  }
 
-}
-
-async function runAnalysis( prepared, runId ) { const rawReport = await
-withTimeout( analyzeAmazonReadiness( prepared.variants, prepared.options
-), prepared.options.scanTimeoutMs, “Amazon Intelligence analysis” );
+  async function runAnalysis(
+    prepared,
+    runId
+  ) {
+    const rawReport =
+      await withTimeout(
+        analyzeAmazonReadiness(
+          prepared.variants,
+          prepared.options
+        ),
+        prepared.options.scanTimeoutMs,
+        "Amazon Intelligence analysis"
+      );
 
     const report =
       applyBinaryReadiness(
@@ -445,13 +676,27 @@ withTimeout( analyzeAmazonReadiness( prepared.variants, prepared.options
     }
 
     return finalReport;
+  }
 
-}
-
-async function executeForegroundRun( req, res, { runType, defaults = {}
-} ) { if ( intelligenceState.status === “RUNNING” ) { return
-res.status(409).json({ success: false, error: “An Amazon Intelligence
-analysis is already running.”, …stateResponse() }); }
+  async function executeForegroundRun(
+    req,
+    res,
+    {
+      runType,
+      defaults = {}
+    }
+  ) {
+    if (
+      intelligenceState.status ===
+      "RUNNING"
+    ) {
+      return res.status(409).json({
+        success: false,
+        error:
+          "An Amazon Intelligence analysis is already running.",
+        ...stateResponse()
+      });
+    }
 
     const prepared =
       await prepareScan(
@@ -506,13 +751,28 @@ analysis is already running.”, …stateResponse() }); }
         stateResponse()
       );
     }
+  }
 
-}
-
-async function executeBackgroundRun( req, res, { runType, defaults = {}
-} ) { if ( intelligenceState.status === “RUNNING” ) { return
-res.status(202).json({ …stateResponse(), accepted: true, stillRunning:
-true, message: “Amazon Intelligence analysis is already running.” }); }
+  async function executeBackgroundRun(
+    req,
+    res,
+    {
+      runType,
+      defaults = {}
+    }
+  ) {
+    if (
+      intelligenceState.status ===
+      "RUNNING"
+    ) {
+      return res.status(202).json({
+        ...stateResponse(),
+        accepted: true,
+        stillRunning: true,
+        message:
+          "Amazon Intelligence analysis is already running."
+      });
+    }
 
     const prepared =
       await prepareScan(
@@ -571,34 +831,80 @@ true, message: “Amazon Intelligence analysis is already running.” }); }
     })();
 
     return undefined;
+  }
 
-}
+  /* =======================================================
+     ROUTE DIRECTORY
+  ======================================================= */
 
-/* ======================================================= ROUTE
-DIRECTORY ======================================================= */
+  router.get("/", (req, res) => {
+    res.json({
+      success: true,
+      version: ROUTER_VERSION,
+      message:
+        "Amazon Intelligence Engine is running.",
+      decisionModel:
+        "BINARY_READINESS",
+      publishingEnabled: false,
+      defaults: {
+        maxVariants:
+          DEFAULT_MAX_VARIANTS,
+        delayMs:
+          DEFAULT_DELAY_MS,
+        minimumScore:
+          DEFAULT_MINIMUM_SCORE,
+        scanTimeoutMs:
+          DEFAULT_SCAN_TIMEOUT_MS
+      },
+      routes: {
+        status:
+          "GET /amazon-intelligence/status",
+        report:
+          "GET /amazon-intelligence/report",
+        analyze:
+          "POST /amazon-intelligence/analyze",
+        analyzeAll:
+          "POST /amazon-intelligence/analyze-all",
+        analyzeProduct:
+          "POST /amazon-intelligence/analyze-product",
+        startScan:
+          "POST /amazon-intelligence/start-scan",
+        dailyRun:
+          "POST /amazon-intelligence/run-daily-now",
+        bestTestProduct:
+          "POST /amazon-intelligence/find-best-test-product",
+        autoFix:
+          "POST /amazon-intelligence/auto-fix"
+      }
+    });
+  });
 
-router.get(“/”, (req, res) => { res.json({ success: true, version:
-ROUTER_VERSION, message: “Amazon Intelligence Engine is running.”,
-decisionModel: “BINARY_READINESS”, publishingEnabled: false, defaults: {
-maxVariants: DEFAULT_MAX_VARIANTS, delayMs: DEFAULT_DELAY_MS,
-minimumScore: DEFAULT_MINIMUM_SCORE, scanTimeoutMs:
-DEFAULT_SCAN_TIMEOUT_MS }, routes: { status: “GET
-/amazon-intelligence/status”, report: “GET /amazon-intelligence/report”,
-analyze: “POST /amazon-intelligence/analyze”, analyzeAll: “POST
-/amazon-intelligence/analyze-all”, analyzeProduct: “POST
-/amazon-intelligence/analyze-product”, startScan: “POST
-/amazon-intelligence/start-scan”, dailyRun: “POST
-/amazon-intelligence/run-daily-now”, bestTestProduct: “POST
-/amazon-intelligence/find-best-test-product”, autoFix: “POST
-/amazon-intelligence/auto-fix” } }); });
+  router.get(
+    "/status",
+    requireAdmin,
+    (req, res) => {
+      res.json(
+        stateResponse()
+      );
+    }
+  );
 
-router.get( “/status”, requireAdmin, (req, res) => { res.json(
-stateResponse() ); } );
-
-router.get( “/report”, requireAdmin, (req, res) => { if (
-intelligenceState.status === “RUNNING” ) { return res.status(202).json({
-…stateResponse(), accepted: true, stillRunning: true, message: “Amazon
-Intelligence analysis is still running.” }); }
+  router.get(
+    "/report",
+    requireAdmin,
+    (req, res) => {
+      if (
+        intelligenceState.status ===
+        "RUNNING"
+      ) {
+        return res.status(202).json({
+          ...stateResponse(),
+          accepted: true,
+          stillRunning: true,
+          message:
+            "Amazon Intelligence analysis is still running."
+        });
+      }
 
       if (
         intelligenceState.status ===
@@ -628,26 +934,76 @@ Intelligence analysis is still running.” }); }
         intelligenceState.report
       );
     }
+  );
 
-);
+  /* =======================================================
+     FOREGROUND ANALYSIS
+  ======================================================= */
 
-/* ======================================================= FOREGROUND
-ANALYSIS ======================================================= */
+  router.post(
+    "/analyze",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        return await executeForegroundRun(
+          req,
+          res,
+          {
+            runType: "MANUAL_ANALYZE",
+            defaults: {
+              maxVariants: 100,
+              delayMs: 0
+            }
+          }
+        );
+      } catch (error) {
+        return sendError(
+          res,
+          500,
+          error,
+          stateResponse()
+        );
+      }
+    }
+  );
 
-router.post( “/analyze”, requireAdmin, async (req, res) => { try {
-return await executeForegroundRun( req, res, { runType:
-“MANUAL_ANALYZE”, defaults: { maxVariants: 100, delayMs: 0 } } ); }
-catch (error) { return sendError( res, 500, error, stateResponse() ); }
-} );
+  router.post(
+    "/analyze-all",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        return await executeForegroundRun(
+          req,
+          res,
+          {
+            runType: "ANALYZE_ALL",
+            defaults: {
+              maxVariants:
+                DEFAULT_MAX_VARIANTS,
+              delayMs:
+                DEFAULT_DELAY_MS
+            }
+          }
+        );
+      } catch (error) {
+        return sendError(
+          res,
+          500,
+          error,
+          stateResponse()
+        );
+      }
+    }
+  );
 
-router.post( “/analyze-all”, requireAdmin, async (req, res) => { try {
-return await executeForegroundRun( req, res, { runType: “ANALYZE_ALL”,
-defaults: { maxVariants: DEFAULT_MAX_VARIANTS, delayMs: DEFAULT_DELAY_MS
-} } ); } catch (error) { return sendError( res, 500, error,
-stateResponse() ); } } );
-
-router.post( “/analyze-product”, requireAdmin, async (req, res) => { try
-{ const productId = req.body?.productId || req.query?.productId;
+  router.post(
+    "/analyze-product",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        const productId =
+          req.body?.productId ||
+          req.query?.productId;
 
         if (!productId) {
           return sendError(
@@ -678,34 +1034,106 @@ router.post( “/analyze-product”, requireAdmin, async (req, res) => { try
         );
       }
     }
+  );
 
-);
+  /* =======================================================
+     BACKGROUND ANALYSIS
+  ======================================================= */
 
-/* ======================================================= BACKGROUND
-ANALYSIS ======================================================= */
+  router.post(
+    "/start-scan",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        return await executeBackgroundRun(
+          req,
+          res,
+          {
+            runType:
+              "BACKGROUND_SCAN"
+          }
+        );
+      } catch (error) {
+        return sendError(
+          res,
+          500,
+          error,
+          stateResponse()
+        );
+      }
+    }
+  );
 
-router.post( “/start-scan”, requireAdmin, async (req, res) => { try {
-return await executeBackgroundRun( req, res, { runType:
-“BACKGROUND_SCAN” } ); } catch (error) { return sendError( res, 500,
-error, stateResponse() ); } } );
+  router.post(
+    "/start-best-test-product-scan",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        return await executeBackgroundRun(
+          req,
+          res,
+          {
+            runType:
+              "BEST_TEST_PRODUCT_SCAN"
+          }
+        );
+      } catch (error) {
+        return sendError(
+          res,
+          500,
+          error,
+          stateResponse()
+        );
+      }
+    }
+  );
 
-router.post( “/start-best-test-product-scan”, requireAdmin, async (req,
-res) => { try { return await executeBackgroundRun( req, res, { runType:
-“BEST_TEST_PRODUCT_SCAN” } ); } catch (error) { return sendError( res,
-500, error, stateResponse() ); } } );
+  router.post(
+    "/run-daily-now",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        return await executeBackgroundRun(
+          req,
+          res,
+          {
+            runType:
+              "DAILY_SCHEDULED_SCAN",
+            defaults: {
+              maxVariants:
+                DEFAULT_MAX_VARIANTS,
+              delayMs:
+                DEFAULT_DELAY_MS,
+              minimumScore:
+                DEFAULT_MINIMUM_SCORE
+            }
+          }
+        );
+      } catch (error) {
+        return sendError(
+          res,
+          500,
+          error,
+          stateResponse()
+        );
+      }
+    }
+  );
 
-router.post( “/run-daily-now”, requireAdmin, async (req, res) => { try {
-return await executeBackgroundRun( req, res, { runType:
-“DAILY_SCHEDULED_SCAN”, defaults: { maxVariants: DEFAULT_MAX_VARIANTS,
-delayMs: DEFAULT_DELAY_MS, minimumScore: DEFAULT_MINIMUM_SCORE } } ); }
-catch (error) { return sendError( res, 500, error, stateResponse() ); }
-} );
+  /* =======================================================
+     BEST TEST PRODUCT
+  ======================================================= */
 
-/* ======================================================= BEST TEST
-PRODUCT ======================================================= */
-
-router.post( “/find-best-test-product”, requireAdmin, async (req, res)
-=> { try { const refresh = normalizeBoolean( req.body?.refresh, false );
+  router.post(
+    "/find-best-test-product",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        const refresh =
+          normalizeBoolean(
+            req.body?.refresh,
+            false
+          );
 
         if (refresh) {
           return await executeBackgroundRun(
@@ -784,15 +1212,20 @@ router.post( “/find-best-test-product”, requireAdmin, async (req, res)
         );
       }
     }
+  );
 
-);
+  /* =======================================================
+     AUTO-FIX RECOMMENDATIONS
+  ======================================================= */
 
-/* ======================================================= AUTO-FIX
-RECOMMENDATIONS =======================================================
-*/
-
-router.post( “/auto-fix”, requireAdmin, async (req, res) => { try {
-const suppliedReport = req.body?.report || null;
+  router.post(
+    "/auto-fix",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        const suppliedReport =
+          req.body?.report ||
+          null;
 
         const report =
           suppliedReport ||
@@ -870,9 +1303,9 @@ const suppliedReport = req.body?.report || null;
         );
       }
     }
+  );
 
-);
-
-return router; }
+  return router;
+}
 
 export default createAmazonIntelligenceRouter;
