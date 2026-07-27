@@ -3,7 +3,8 @@
 
 import { scanAmazonVariant } from "./amazonEngine.js";
 
-const ENGINE_VERSION = "amazon-intelligence-v1";
+const ENGINE_VERSION = "amazon-intelligence-v2";
+const DEFAULT_MINIMUM_SCORE = 85;
 
 /* =========================================================
    BASIC HELPERS
@@ -19,6 +20,7 @@ function cleanText(value) {
 
 function money(value) {
   const number = Number(value);
+
   return Number.isFinite(number)
     ? Number(number.toFixed(2))
     : 0;
@@ -42,11 +44,7 @@ function calculateCheckDigit(body) {
   let sum = 0;
   const parity = digits.length % 2;
 
-  for (
-    let index = 0;
-    index < digits.length;
-    index++
-  ) {
+  for (let index = 0; index < digits.length; index++) {
     const weight =
       index % 2 === parity
         ? 3
@@ -55,14 +53,11 @@ function calculateCheckDigit(body) {
     sum += digits[index] * weight;
   }
 
-  return String(
-    (10 - (sum % 10)) % 10
-  );
+  return String((10 - (sum % 10)) % 10);
 }
 
 export function validateBarcode(value) {
-  const barcode =
-    cleanDigits(value);
+  const barcode = cleanDigits(value);
 
   if (!barcode) {
     return {
@@ -75,50 +70,34 @@ export function validateBarcode(value) {
     };
   }
 
-  if (
-    ![
-      12,
-      13,
-      14
-    ].includes(barcode.length)
-  ) {
+  if (![8, 12, 13, 14].includes(barcode.length)) {
     return {
       valid: false,
       normalized: barcode,
       type: null,
       reason: "INVALID_LENGTH",
       expectedCheckDigit: null,
-      actualCheckDigit:
-        barcode.slice(-1) || null
+      actualCheckDigit: barcode.slice(-1) || null
     };
   }
 
-  const body =
-    barcode.slice(0, -1);
-
-  const expectedCheckDigit =
-    calculateCheckDigit(body);
-
-  const actualCheckDigit =
-    barcode.slice(-1);
-
-  const valid =
-    expectedCheckDigit ===
-    actualCheckDigit;
+  const body = barcode.slice(0, -1);
+  const expectedCheckDigit = calculateCheckDigit(body);
+  const actualCheckDigit = barcode.slice(-1);
+  const valid = expectedCheckDigit === actualCheckDigit;
 
   return {
     valid,
     normalized: barcode,
     type:
-      barcode.length === 12
-        ? "UPC"
-        : barcode.length === 13
-        ? "EAN"
-        : "GTIN",
-    reason:
-      valid
-        ? null
-        : "INVALID_CHECK_DIGIT",
+      barcode.length === 8
+        ? "GTIN_8"
+        : barcode.length === 12
+          ? "UPC"
+          : barcode.length === 13
+            ? "EAN"
+            : "GTIN_14",
+    reason: valid ? null : "INVALID_CHECK_DIGIT",
     expectedCheckDigit,
     actualCheckDigit
   };
@@ -128,175 +107,91 @@ export function validateBarcode(value) {
    DUPLICATE BARCODE DETECTION
 ========================================================= */
 
-export function detectDuplicateBarcodes(
-  variants = []
-) {
-  const index =
-    new Map();
+export function detectDuplicateBarcodes(variants = []) {
+  const index = new Map();
 
-  for (
-    const variant of
-    variants
-  ) {
-    const barcode =
-      cleanDigits(
-        variant?.barcode
-      );
+  for (const variant of variants) {
+    const barcode = cleanDigits(variant?.barcode);
 
     if (!barcode) {
       continue;
     }
 
-    if (
-      !index.has(barcode)
-    ) {
-      index.set(
-        barcode,
-        []
-      );
+    if (!index.has(barcode)) {
+      index.set(barcode, []);
     }
 
-    index
-      .get(barcode)
-      .push({
-        shopify_product_id:
-          variant
-            .shopify_product_id ||
-          null,
+    index.get(barcode).push({
+      shopify_product_id:
+        variant?.shopify_product_id || null,
 
-        shopify_variant_id:
-          variant
-            .shopify_variant_id ||
-          variant.id ||
-          null,
+      shopify_variant_id:
+        variant?.shopify_variant_id ||
+        variant?.id ||
+        null,
 
-        sku:
-          variant.sku ||
-          null,
+      sku:
+        variant?.sku ||
+        null,
 
-        productTitle:
-          variant
-            .productTitle ||
-          null
-      });
+      productTitle:
+        variant?.productTitle ||
+        null
+    });
   }
 
-  return Array
-    .from(
-      index.entries()
-    )
-    .filter(
-      (
-        [
-          ,
-          matches
-        ]
-      ) =>
-        matches.length > 1
-    )
-    .map(
-      (
-        [
-          barcode,
-          matches
-        ]
-      ) => ({
-        barcode,
-        count:
-          matches.length,
-        matches
-      })
-    );
+  return Array.from(index.entries())
+    .filter(([, matches]) => matches.length > 1)
+    .map(([barcode, matches]) => ({
+      barcode,
+      count: matches.length,
+      matches
+    }));
 }
 
 /* =========================================================
    PRODUCT / VARIANT GROUPING
 ========================================================= */
 
-export function groupVariantsByProduct(
-  variants = []
-) {
-  const groups =
-    new Map();
+export function groupVariantsByProduct(variants = []) {
+  const groups = new Map();
 
-  for (
-    const variant of
-    variants
-  ) {
+  for (const variant of variants) {
     const productId =
-      variant
-        .shopify_product_id ||
-      `unknown:${variant.productTitle || "untitled"}`;
+      variant?.shopify_product_id ||
+      `unknown:${variant?.productTitle || "untitled"}`;
 
-    if (
-      !groups.has(
-        productId
-      )
-    ) {
-      groups.set(
+    if (!groups.has(productId)) {
+      groups.set(productId, {
         productId,
-        {
-          productId,
-
-          productTitle:
-            variant
-              .productTitle ||
-            null,
-
-          vendor:
-            variant.vendor ||
-            null,
-
-          productType:
-            variant
-              .productType ||
-            null,
-
-          variants: []
-        }
-      );
+        productTitle:
+          variant?.productTitle || null,
+        vendor:
+          variant?.vendor || null,
+        productType:
+          variant?.productType || null,
+        variants: []
+      });
     }
 
-    groups
-      .get(productId)
-      .variants
-      .push(variant);
+    groups.get(productId).variants.push(variant);
   }
 
-  return Array.from(
-    groups.values()
-  );
+  return Array.from(groups.values());
 }
 
-export function analyzeVariationCompleteness(
-  group
-) {
+export function analyzeVariationCompleteness(group) {
   const variants =
-    Array.isArray(
-      group?.variants
-    )
+    Array.isArray(group?.variants)
       ? group.variants
       : [];
 
-  const optionNames =
-    new Set();
-
+  const optionNames = new Set();
   const issues = [];
 
-  for (
-    const variant of
-    variants
-  ) {
-    for (
-      const option of
-      variant
-        .selectedOptions ||
-      []
-    ) {
-      const name =
-        cleanText(
-          option?.name
-        );
+  for (const variant of variants) {
+    for (const option of variant?.selectedOptions || []) {
+      const name = cleanText(option?.name);
 
       if (name) {
         optionNames.add(name);
@@ -304,50 +199,23 @@ export function analyzeVariationCompleteness(
     }
   }
 
-  if (
-    variants.length > 1
-  ) {
-    for (
-      const variant of
-      variants
-    ) {
-      const selected =
-        new Map(
-          (
-            variant
-              .selectedOptions ||
-            []
-          ).map(
-            (entry) => [
-              cleanText(
-                entry?.name
-              ),
-              cleanText(
-                entry?.value
-              )
-            ]
-          )
-        );
+  if (variants.length > 1) {
+    for (const variant of variants) {
+      const selected = new Map(
+        (variant?.selectedOptions || []).map((entry) => [
+          cleanText(entry?.name),
+          cleanText(entry?.value)
+        ])
+      );
 
-      for (
-        const optionName of
-        optionNames
-      ) {
-        if (
-          !selected.get(
-            optionName
-          )
-        ) {
+      for (const optionName of optionNames) {
+        if (!selected.get(optionName)) {
           issues.push({
-            code:
-              "INCOMPLETE_VARIATION_OPTIONS",
-
+            code: "INCOMPLETE_VARIATION_OPTIONS",
             shopify_variant_id:
-              variant
-                .shopify_variant_id ||
-              variant.id ||
+              variant?.shopify_variant_id ||
+              variant?.id ||
               null,
-
             message:
               `Variant is missing a value for "${optionName}".`
           });
@@ -358,20 +226,13 @@ export function analyzeVariationCompleteness(
 
   return {
     productId:
-      group?.productId ||
-      null,
-
+      group?.productId || null,
     variantCount:
       variants.length,
-
     optionNames:
-      Array.from(
-        optionNames
-      ),
-
+      Array.from(optionNames),
     complete:
       issues.length === 0,
-
     issues
   };
 }
@@ -380,68 +241,40 @@ export function analyzeVariationCompleteness(
    COST LOOKUP
 ========================================================= */
 
-function buildCostIndex(
-  costs = []
-) {
-  const index =
-    new Map();
+function buildCostIndex(costs = []) {
+  const index = new Map();
 
-  for (
-    const cost of
-    costs
-  ) {
+  for (const cost of costs) {
     const possibleKeys = [
-      cost
-        .shopify_variant_id,
-      cost.variantId,
-      cost.sku,
-      cleanDigits(
-        cost.barcode
-      )
+      cost?.shopify_variant_id,
+      cost?.variantId,
+      cost?.sku,
+      cleanDigits(cost?.barcode)
     ]
       .filter(Boolean)
       .map(String);
 
-    for (
-      const key of
-      possibleKeys
-    ) {
-      index.set(
-        key,
-        cost
-      );
+    for (const key of possibleKeys) {
+      index.set(key, cost);
     }
   }
 
   return index;
 }
 
-function findCost(
-  costIndex,
-  variant
-) {
+function findCost(costIndex, variant) {
   const possibleKeys = [
-    variant
-      .shopify_variant_id,
-    variant.id,
-    variant.sku,
-    cleanDigits(
-      variant.barcode
-    )
+    variant?.shopify_variant_id,
+    variant?.id,
+    variant?.sku,
+    cleanDigits(variant?.barcode)
   ]
     .filter(Boolean)
     .map(String);
 
-  for (
-    const key of
-    possibleKeys
-  ) {
-    if (
-      costIndex.has(key)
-    ) {
-      return costIndex.get(
-        key
-      );
+  for (const key of possibleKeys) {
+    if (costIndex.has(key)) {
+      return costIndex.get(key);
     }
   }
 
@@ -456,85 +289,67 @@ export function estimateProfitability(
   input = {},
   config = {}
 ) {
-  const sellingPrice =
-    money(
-      input.sellingPrice ??
-      input.price
-    );
+  const sellingPrice = money(
+    input.sellingPrice ??
+    input.price
+  );
 
-  const productCost =
-    money(
-      input.productCost ??
-      input.cjCost
-    );
+  const productCost = money(
+    input.productCost ??
+    input.cjCost
+  );
 
-  const shippingCost =
-    money(
-      input.shippingCost ??
-      input.cjShippingCost
-    );
+  const shippingCost = money(
+    input.shippingCost ??
+    input.cjShippingCost
+  );
 
-  const referralFeeRate =
-    Number(
-      input.referralFeeRate ??
-      config.referralFeeRate ??
-      process.env
-        .AMAZON_ESTIMATED_REFERRAL_FEE_RATE ??
-      0.15
-    );
+  const referralFeeRate = Number(
+    input.referralFeeRate ??
+    config.referralFeeRate ??
+    process.env.AMAZON_ESTIMATED_REFERRAL_FEE_RATE ??
+    0.15
+  );
 
-  const closingFee =
-    money(
-      input.closingFee ??
-      config.closingFee ??
-      process.env
-        .AMAZON_ESTIMATED_CLOSING_FEE ??
-      0
-    );
+  const closingFee = money(
+    input.closingFee ??
+    config.closingFee ??
+    process.env.AMAZON_ESTIMATED_CLOSING_FEE ??
+    0
+  );
 
-  const fulfillmentFee =
-    money(
-      input.fulfillmentFee ??
-      config.fulfillmentFee ??
-      process.env
-        .AMAZON_ESTIMATED_FULFILLMENT_FEE ??
-      0
-    );
+  const fulfillmentFee = money(
+    input.fulfillmentFee ??
+    config.fulfillmentFee ??
+    process.env.AMAZON_ESTIMATED_FULFILLMENT_FEE ??
+    0
+  );
 
-  const referralFee =
-    money(
-      sellingPrice *
-      referralFeeRate
-    );
+  const referralFee = money(
+    sellingPrice * referralFeeRate
+  );
 
-  const estimatedAmazonFees =
-    money(
-      referralFee +
-      closingFee +
-      fulfillmentFee
-    );
+  const estimatedAmazonFees = money(
+    referralFee +
+    closingFee +
+    fulfillmentFee
+  );
 
-  const totalCost =
-    money(
-      productCost +
-      shippingCost +
-      estimatedAmazonFees
-    );
+  const totalCost = money(
+    productCost +
+    shippingCost +
+    estimatedAmazonFees
+  );
 
-  const estimatedProfit =
-    money(
-      sellingPrice -
-      totalCost
-    );
+  const estimatedProfit = money(
+    sellingPrice - totalCost
+  );
 
   const marginPercent =
     sellingPrice > 0
       ? Number(
           (
-            (
-              estimatedProfit /
-              sellingPrice
-            ) *
+            (estimatedProfit / sellingPrice) *
             100
           ).toFixed(2)
         )
@@ -546,34 +361,21 @@ export function estimateProfitability(
 
   return {
     sellingPrice,
-
     productCost,
-
     shippingCost,
-
     referralFeeRate,
-
     referralFee,
-
     closingFee,
-
     fulfillmentFee,
-
     estimatedAmazonFees,
-
     totalCost,
-
     estimatedProfit,
-
     marginPercent,
-
     hasSupplierCosts,
-
     profitable:
       hasSupplierCosts
         ? estimatedProfit > 0
         : null,
-
     confidence:
       hasSupplierCosts
         ? "ESTIMATED"
@@ -585,29 +387,16 @@ export function estimateProfitability(
    AMAZON READY SCORE
 ========================================================= */
 
-export function calculateAmazonReadyScore(
-  context = {}
-) {
-  const scan =
-    context.scan ||
-    {};
-
+export function calculateAmazonReadyScore(context = {}) {
+  const scan = context.scan || {};
   const barcodeValidation =
-    context.barcodeValidation ||
-    {};
-
+    context.barcodeValidation || {};
   const profitability =
-    context.profitability ||
-    {};
-
+    context.profitability || {};
   const variation =
-    context.variation ||
-    {};
-
+    context.variation || {};
   const duplicateBarcode =
-    Boolean(
-      context.duplicateBarcode
-    );
+    Boolean(context.duplicateBarcode);
 
   const breakdown = {
     barcode: 0,
@@ -622,22 +411,15 @@ export function calculateAmazonReadyScore(
     profit: 0
   };
 
-  if (
-    barcodeValidation.valid
-  ) {
+  if (barcodeValidation.valid) {
     breakdown.barcode = 15;
   }
 
-  if (
-    scan.amazon?.matched
-  ) {
+  if (scan.amazon?.matched) {
     breakdown.amazonMatch = 20;
   }
 
-  if (
-    scan.amazon?.eligible !==
-    false
-  ) {
+  if (scan.amazon?.eligible !== false) {
     breakdown.restrictions = 15;
   }
 
@@ -648,11 +430,7 @@ export function calculateAmazonReadyScore(
     breakdown.listingState = 5;
   }
 
-  if (
-    Number(
-      scan.inventoryQuantity
-    ) > 0
-  ) {
+  if (Number(scan.inventoryQuantity) > 0) {
     breakdown.inventory = 10;
   }
 
@@ -664,114 +442,80 @@ export function calculateAmazonReadyScore(
     breakdown.sku = 5;
   }
 
-  if (
-    variation.complete !==
-    false
-  ) {
+  if (variation.complete !== false) {
     breakdown.variation = 5;
   }
 
-  if (
-    profitability
-      .hasSupplierCosts
-  ) {
+  if (profitability.hasSupplierCosts) {
     breakdown.supplierData = 5;
 
-    if (
-      profitability
-        .marginPercent >= 30
-    ) {
+    if (profitability.marginPercent >= 30) {
       breakdown.profit = 15;
-    } else if (
-      profitability
-        .marginPercent >= 20
-    ) {
+    } else if (profitability.marginPercent >= 20) {
       breakdown.profit = 12;
-    } else if (
-      profitability
-        .marginPercent >= 10
-    ) {
+    } else if (profitability.marginPercent >= 10) {
       breakdown.profit = 7;
-    } else if (
-      profitability
-        .marginPercent > 0
-    ) {
+    } else if (profitability.marginPercent > 0) {
       breakdown.profit = 3;
     }
   }
 
-  let score =
-    Object
-      .values(breakdown)
-      .reduce(
-        (
-          sum,
-          value
-        ) =>
-          sum + value,
-        0
-      );
+  let score = Object
+    .values(breakdown)
+    .reduce(
+      (sum, value) => sum + value,
+      0
+    );
 
-  if (
-    duplicateBarcode
-  ) {
+  if (duplicateBarcode) {
     score -= 25;
   }
 
-  if (
-    !barcodeValidation.valid
-  ) {
+  if (!barcodeValidation.valid) {
     score -= 10;
   }
 
-  if (
-    scan.amazon?.eligible ===
-    false
-  ) {
+  if (scan.amazon?.eligible === false) {
     score -= 30;
   }
 
-  if (
-    scan.status ===
-    "FAILED"
-  ) {
+  if (scan.status === "FAILED") {
     score -= 30;
   }
 
-  score =
-    Math.max(
-      0,
-      Math.min(
-        100,
-        score
-      )
-    );
+  score = Math.max(
+    0,
+    Math.min(100, score)
+  );
 
-  let status =
-    "NOT_RECOMMENDED";
+  const minimumScore = Number(
+    context.minimumScore ??
+    DEFAULT_MINIMUM_SCORE
+  );
 
-  if (
-    score >= 85 &&
-    scan.status ===
-      "READY"
-  ) {
-    status =
-      "AMAZON_READY";
-  } else if (
-    score >= 65
-  ) {
-    status =
-      "NEARLY_READY";
-  } else if (
-    score >= 35
-  ) {
-    status =
-      "NEEDS_WORK";
-  }
+  const hardBlocker =
+    duplicateBarcode ||
+    !barcodeValidation.valid ||
+    scan.amazon?.eligible === false ||
+    scan.status === "FAILED" ||
+    Number(scan.inventoryQuantity || 0) <= 0 ||
+    !scan.sku;
+
+  const readinessStatus =
+    score >= minimumScore &&
+    scan.status === "READY" &&
+    !hardBlocker
+      ? "AMAZON_READY"
+      : "NOT_AMAZON_READY";
 
   return {
     score,
-    status,
+    status: readinessStatus,
+    readinessStatus,
+    publishEligible:
+      readinessStatus ===
+      "AMAZON_READY",
+    minimumScore,
     breakdown
   };
 }
@@ -780,64 +524,41 @@ export function calculateAmazonReadyScore(
    BLOCKER REPORT
 ========================================================= */
 
-export function buildBlockers(
-  report
-) {
+export function buildBlockers(report) {
   const blockers = [];
 
-  if (
-    !report
-      .barcodeValidation
-      ?.valid
-  ) {
+  if (!report?.barcodeValidation?.valid) {
     blockers.push({
       code:
-        report
-          .barcodeValidation
-          ?.reason ||
+        report?.barcodeValidation?.reason ||
         "INVALID_BARCODE",
-
       message:
         "The variant does not have a valid UPC, EAN, or GTIN."
     });
   }
 
-  if (
-    report.duplicateBarcode
-  ) {
+  if (report?.duplicateBarcode) {
     blockers.push({
-      code:
-        "DUPLICATE_BARCODE",
-
+      code: "DUPLICATE_BARCODE",
       message:
         "The same barcode is assigned to more than one Shopify variant."
     });
   }
 
   if (
-    report.scan
-      ?.amazon
-      ?.eligible ===
+    report?.scan?.amazon?.eligible ===
     false
   ) {
     blockers.push({
-      code:
-        "AMAZON_RESTRICTED",
-
+      code: "AMAZON_RESTRICTED",
       message:
         "Amazon returned a listing restriction for this ASIN."
     });
   }
 
-  if (
-    !report.scan
-      ?.amazon
-      ?.matched
-  ) {
+  if (!report?.scan?.amazon?.matched) {
     blockers.push({
-      code:
-        "NO_AMAZON_MATCH",
-
+      code: "NO_AMAZON_MATCH",
       message:
         "Amazon did not return an existing catalog match."
     });
@@ -845,43 +566,57 @@ export function buildBlockers(
 
   if (
     Number(
-      report.scan
-        ?.inventoryQuantity ||
+      report?.scan?.inventoryQuantity ||
       0
     ) <= 0
   ) {
     blockers.push({
-      code:
-        "OUT_OF_STOCK",
-
+      code: "OUT_OF_STOCK",
       message:
         "The Shopify variant has no available inventory."
     });
   }
 
-  if (
-    !report.scan?.sku
-  ) {
+  if (!report?.scan?.sku) {
     blockers.push({
-      code:
-        "MISSING_SKU",
-
+      code: "MISSING_SKU",
       message:
         "The Shopify variant needs a unique SKU."
     });
   }
 
-  if (
-    !report
-      .profitability
-      ?.hasSupplierCosts
-  ) {
+  if (!report?.scan?.image) {
     blockers.push({
-      code:
-        "MISSING_SUPPLIER_COSTS",
+      code: "MISSING_IMAGE",
+      message:
+        "The Shopify variant needs at least one product image."
+    });
+  }
 
+  if (report?.variation?.complete === false) {
+    blockers.push({
+      code: "INCOMPLETE_VARIATION_OPTIONS",
+      message:
+        "One or more variants are missing required option values."
+    });
+  }
+
+  if (!report?.profitability?.hasSupplierCosts) {
+    blockers.push({
+      code: "MISSING_SUPPLIER_COSTS",
       message:
         "CJ product and shipping costs were not supplied, so profit cannot be confirmed."
+    });
+  }
+
+  if (
+    report?.profitability?.hasSupplierCosts &&
+    report?.profitability?.estimatedProfit <= 0
+  ) {
+    blockers.push({
+      code: "UNPROFITABLE",
+      message:
+        "The estimated Amazon sale would not produce a positive profit."
     });
   }
 
@@ -889,90 +624,108 @@ export function buildBlockers(
 }
 
 /* =========================================================
+   AUTO-FIX RECOMMENDATIONS
+========================================================= */
+
+export function buildAutoFixActions(report) {
+  const blockers =
+    Array.isArray(report?.blockers)
+      ? report.blockers
+      : [];
+
+  const recommendations = {
+    MISSING_BARCODE:
+      "Add the supplier's verified GS1 UPC, EAN, or GTIN.",
+    INVALID_LENGTH:
+      "Replace the barcode with a valid 8, 12, 13, or 14 digit identifier.",
+    INVALID_CHECK_DIGIT:
+      "Correct the barcode check digit or replace the barcode.",
+    DUPLICATE_BARCODE:
+      "Assign a unique barcode to each Shopify variant.",
+    AMAZON_RESTRICTED:
+      "Request Amazon approval or select an unrestricted product.",
+    NO_AMAZON_MATCH:
+      "Review catalog candidates or prepare a new Amazon catalog listing.",
+    OUT_OF_STOCK:
+      "Increase Shopify inventory before publishing.",
+    MISSING_SKU:
+      "Generate and save a unique seller SKU.",
+    MISSING_IMAGE:
+      "Add a primary product image.",
+    INCOMPLETE_VARIATION_OPTIONS:
+      "Complete all size, color, and style values.",
+    MISSING_SUPPLIER_COSTS:
+      "Add CJ product and shipping costs.",
+    UNPROFITABLE:
+      "Increase the selling price or lower product and shipping costs."
+  };
+
+  return blockers.map((blocker) => {
+    const code = String(
+      blocker?.code || "UNKNOWN"
+    );
+
+    return {
+      code,
+      message:
+        blocker?.message ||
+        "Review this readiness blocker.",
+      recommendedAction:
+        recommendations[code] ||
+        "Correct the product data and analyze the item again.",
+      automatic:
+        [
+          "MISSING_SKU",
+          "INCOMPLETE_VARIATION_OPTIONS"
+        ].includes(code)
+    };
+  });
+}
+
+/* =========================================================
    SUMMARY
 ========================================================= */
 
-export function buildIntelligenceSummary(
-  reports = []
-) {
+export function buildIntelligenceSummary(reports = []) {
   const summary = {
-    total:
-      reports.length,
-
+    total: reports.length,
     amazonReady: 0,
-
-    nearlyReady: 0,
-
-    needsWork: 0,
-
-    notRecommended: 0,
-
+    notAmazonReady: 0,
+    publishEligible: 0,
     duplicateBarcode: 0,
-
     invalidBarcode: 0,
-
     missingSupplierCosts: 0,
-
     readyInExistingEngine: 0
   };
 
-  for (
-    const report of
-    reports
-  ) {
-    switch (
-      report
-        .intelligenceStatus
+  for (const report of reports) {
+    if (
+      report?.readinessStatus ===
+      "AMAZON_READY"
     ) {
-      case "AMAZON_READY":
-        summary.amazonReady++;
-        break;
-
-      case "NEARLY_READY":
-        summary.nearlyReady++;
-        break;
-
-      case "NEEDS_WORK":
-        summary.needsWork++;
-        break;
-
-      default:
-        summary.notRecommended++;
-        break;
+      summary.amazonReady++;
+    } else {
+      summary.notAmazonReady++;
     }
 
-    if (
-      report.duplicateBarcode
-    ) {
-      summary
-        .duplicateBarcode++;
+    if (report?.publishEligible) {
+      summary.publishEligible++;
     }
 
-    if (
-      !report
-        .barcodeValidation
-        ?.valid
-    ) {
-      summary
-        .invalidBarcode++;
+    if (report?.duplicateBarcode) {
+      summary.duplicateBarcode++;
     }
 
-    if (
-      !report
-        .profitability
-        ?.hasSupplierCosts
-    ) {
-      summary
-        .missingSupplierCosts++;
+    if (!report?.barcodeValidation?.valid) {
+      summary.invalidBarcode++;
     }
 
-    if (
-      report.scan
-        ?.status ===
-      "READY"
-    ) {
-      summary
-        .readyInExistingEngine++;
+    if (!report?.profitability?.hasSupplierCosts) {
+      summary.missingSupplierCosts++;
+    }
+
+    if (report?.scan?.status === "READY") {
+      summary.readyInExistingEngine++;
     }
   }
 
@@ -987,113 +740,72 @@ export function selectBestTestProduct(
   reports = [],
   options = {}
 ) {
-  const minimumScore =
-    Number(
-      options.minimumScore ??
-      70
-    );
+  const minimumScore = Number(
+    options.minimumScore ??
+    DEFAULT_MINIMUM_SCORE
+  );
 
-  const eligible =
-    reports
-      .filter(
-        (report) =>
-          report.scan?.status ===
-          "READY"
-      )
-      .filter(
-        (report) =>
-          report
-            .amazonReadyScore >=
-          minimumScore
-      )
-      .filter(
-        (report) =>
-          !report
-            .duplicateBarcode
-      )
-      .filter(
-        (report) =>
-          report
-            .barcodeValidation
-            ?.valid
-      )
-      .sort(
-        (
-          first,
-          second
-        ) => {
-          if (
-            second
-              .amazonReadyScore !==
-            first
-              .amazonReadyScore
-          ) {
-            return (
-              second
-                .amazonReadyScore -
-              first
-                .amazonReadyScore
-            );
-          }
+  const eligible = reports
+    .filter(
+      (report) =>
+        report?.readinessStatus ===
+        "AMAZON_READY"
+    )
+    .filter(
+      (report) =>
+        report?.publishEligible === true
+    )
+    .filter(
+      (report) =>
+        Number(report?.amazonReadyScore || 0) >=
+        minimumScore
+    )
+    .sort((first, second) => {
+      if (
+        second.amazonReadyScore !==
+        first.amazonReadyScore
+      ) {
+        return (
+          second.amazonReadyScore -
+          first.amazonReadyScore
+        );
+      }
 
-          const firstMargin =
-            Number(
-              first
-                .profitability
-                ?.marginPercent ||
-              0
-            );
-
-          const secondMargin =
-            Number(
-              second
-                .profitability
-                ?.marginPercent ||
-              0
-            );
-
-          if (
-            secondMargin !==
-            firstMargin
-          ) {
-            return (
-              secondMargin -
-              firstMargin
-            );
-          }
-
-          const firstInventory =
-            Number(
-              first.scan
-                ?.inventoryQuantity ||
-              0
-            );
-
-          const secondInventory =
-            Number(
-              second.scan
-                ?.inventoryQuantity ||
-              0
-            );
-
-          return (
-            secondInventory -
-            firstInventory
-          );
-        }
+      const firstMargin = Number(
+        first?.profitability?.marginPercent ||
+        0
       );
 
-  if (
-    eligible.length === 0
-  ) {
+      const secondMargin = Number(
+        second?.profitability?.marginPercent ||
+        0
+      );
+
+      if (secondMargin !== firstMargin) {
+        return secondMargin - firstMargin;
+      }
+
+      const firstInventory = Number(
+        first?.scan?.inventoryQuantity ||
+        0
+      );
+
+      const secondInventory = Number(
+        second?.scan?.inventoryQuantity ||
+        0
+      );
+
+      return (
+        secondInventory -
+        firstInventory
+      );
+    });
+
+  if (eligible.length === 0) {
     return {
       found: false,
-
-      reason:
-        "NO_SAFE_TEST_PRODUCT",
-
+      reason: "NO_SAFE_TEST_PRODUCT",
       minimumScore,
-
       recommendation:
         "Fix the highest-ranked blockers and run the analysis again."
     };
@@ -1101,14 +813,10 @@ export function selectBestTestProduct(
 
   return {
     found: true,
-
     minimumScore,
-
-    product:
-      eligible[0],
-
+    product: eligible[0],
     reason:
-      "Highest safe Amazon Ready Score, with profit margin and inventory used as tie-breakers."
+      "Highest Amazon Ready Score, with profit margin and inventory used as tie-breakers."
   };
 }
 
@@ -1120,67 +828,46 @@ export async function analyzeAmazonReadiness(
   variants = [],
   options = {}
 ) {
-  if (
-    !Array.isArray(
-      variants
-    )
-  ) {
+  if (!Array.isArray(variants)) {
     throw new Error(
       "variants must be an array."
     );
   }
 
-  const delayMs =
-    Math.max(
-      0,
-      Number(
-        options.delayMs ??
-        750
-      )
-    );
-
-  const minimumScore =
+  const delayMs = Math.max(
+    0,
     Number(
-      options.minimumScore ??
-      70
-    );
+      options.delayMs ??
+      750
+    )
+  );
+
+  const minimumScore = Number(
+    options.minimumScore ??
+    DEFAULT_MINIMUM_SCORE
+  );
 
   const duplicateDetails =
-    detectDuplicateBarcodes(
-      variants
-    );
+    detectDuplicateBarcodes(variants);
 
-  const duplicateSet =
-    new Set(
-      duplicateDetails
-        .map(
-          (entry) =>
-            entry.barcode
-        )
-    );
+  const duplicateSet = new Set(
+    duplicateDetails.map(
+      (entry) => entry.barcode
+    )
+  );
 
-  const variationByProduct =
-    new Map(
-      groupVariantsByProduct(
-        variants
-      ).map(
-        (group) => [
-          String(
-            group.productId
-          ),
+  const variationByProduct = new Map(
+    groupVariantsByProduct(variants).map(
+      (group) => [
+        String(group.productId),
+        analyzeVariationCompleteness(group)
+      ]
+    )
+  );
 
-          analyzeVariationCompleteness(
-            group
-          )
-        ]
-      )
-    );
-
-  const costIndex =
-    buildCostIndex(
-      options.costs ||
-      []
-    );
+  const costIndex = buildCostIndex(
+    options.costs || []
+  );
 
   const reports = [];
 
@@ -1189,41 +876,63 @@ export async function analyzeAmazonReadiness(
     index < variants.length;
     index++
   ) {
-    const variant =
-      variants[index];
+    const variant = variants[index];
 
-    const scan =
-      await scanAmazonVariant(
+    let scan;
+
+    try {
+      scan = await scanAmazonVariant(
         variant,
         {
           checkPublished:
-            options
-              .checkPublished !==
+            options.checkPublished !==
             false,
 
           checkRestrictions:
-            options
-              .checkRestrictions !==
+            options.checkRestrictions !==
             false
         }
       );
+    } catch (error) {
+      scan = {
+        status: "FAILED",
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+        sku:
+          variant?.sku || null,
+        image:
+          variant?.image || null,
+        price:
+          Number(variant?.price || 0),
+        inventoryQuantity:
+          Number(
+            variant?.inventoryQuantity ||
+            0
+          ),
+        amazon: {
+          matched: false,
+          eligible: null,
+          listingStatus: null
+        }
+      };
+    }
 
     const barcodeValidation =
       validateBarcode(
-        variant.barcode
+        variant?.barcode
       );
 
     const duplicateBarcode =
       duplicateSet.has(
-        barcodeValidation
-          .normalized
+        barcodeValidation.normalized
       );
 
     const variation =
       variationByProduct.get(
         String(
-          variant
-            .shopify_product_id
+          variant?.shopify_product_id
         )
       ) || {
         complete: true,
@@ -1232,45 +941,40 @@ export async function analyzeAmazonReadiness(
         issues: []
       };
 
-    const cost =
-      findCost(
-        costIndex,
-        variant
-      );
+    const cost = findCost(
+      costIndex,
+      variant
+    );
 
     const profitability =
       estimateProfitability(
         {
           sellingPrice:
-            scan.price,
+            scan?.price ??
+            variant?.price,
 
           productCost:
-            cost.productCost ??
-            cost.cjCost ??
-            variant.productCost ??
-            variant.cjCost,
+            cost?.productCost ??
+            cost?.cjCost ??
+            variant?.productCost ??
+            variant?.cjCost,
 
           shippingCost:
-            cost.shippingCost ??
-            cost.cjShippingCost ??
-            variant.shippingCost ??
-            variant.cjShippingCost,
+            cost?.shippingCost ??
+            cost?.cjShippingCost ??
+            variant?.shippingCost ??
+            variant?.cjShippingCost,
 
           referralFeeRate:
-            cost
-              .referralFeeRate,
+            cost?.referralFeeRate,
 
           closingFee:
-            cost.closingFee,
+            cost?.closingFee,
 
           fulfillmentFee:
-            cost
-              .fulfillmentFee
+            cost?.fulfillmentFee
         },
-
-        options
-          .profitability ||
-        {}
+        options.profitability || {}
       );
 
     const score =
@@ -1279,93 +983,99 @@ export async function analyzeAmazonReadiness(
         barcodeValidation,
         duplicateBarcode,
         variation,
-        profitability
+        profitability,
+        minimumScore
       });
 
     const report = {
       key:
         String(
-          variant
-            .shopify_variant_id ||
-          variant.id ||
-          variant.sku ||
-          variant.barcode ||
+          variant?.shopify_variant_id ||
+          variant?.id ||
+          variant?.sku ||
+          variant?.barcode ||
           ""
         ),
 
       analyzedAt:
-        new Date()
-          .toISOString(),
+        new Date().toISOString(),
 
       amazonReadyScore:
         score.score,
 
       intelligenceStatus:
-        score.status,
+        score.readinessStatus,
+
+      readinessStatus:
+        score.readinessStatus,
+
+      publishEligible:
+        score.publishEligible,
 
       scoreBreakdown:
         score.breakdown,
 
+      minimumScore:
+        score.minimumScore,
+
       duplicateBarcode,
-
       barcodeValidation,
-
       variation,
-
       profitability,
-
       scan
     };
 
     report.blockers =
-      buildBlockers(
-        report
+      buildBlockers(report);
+
+    if (report.blockers.length > 0) {
+      report.readinessStatus =
+        "NOT_AMAZON_READY";
+      report.intelligenceStatus =
+        "NOT_AMAZON_READY";
+      report.publishEligible = false;
+    }
+
+    report.autoFixActions =
+      buildAutoFixActions(report);
+
+    report.autoFixAvailable =
+      report.autoFixActions.some(
+        (action) =>
+          action.automatic
       );
 
-    reports.push(
-      report
-    );
+    reports.push(report);
 
     if (
       delayMs > 0 &&
-      index <
-        variants.length - 1
+      index < variants.length - 1
     ) {
-      await sleep(
-        delayMs
-      );
+      await sleep(delayMs);
     }
   }
 
   reports.sort(
-    (
-      first,
-      second
-    ) =>
-      second
-        .amazonReadyScore -
-      first
-        .amazonReadyScore
+    (first, second) =>
+      second.amazonReadyScore -
+      first.amazonReadyScore
   );
 
   return {
     success: true,
-
-    version:
-      ENGINE_VERSION,
-
+    version: ENGINE_VERSION,
+    decisionModel:
+      "BINARY_READINESS",
+    publishPolicy:
+      "Only products with readinessStatus AMAZON_READY and publishEligible true may be published.",
     analyzedAt:
-      new Date()
-        .toISOString(),
-
+      new Date().toISOString(),
+    minimumReadyScore:
+      minimumScore,
     summary:
-      buildIntelligenceSummary(
-        reports
-      ),
-
+      buildIntelligenceSummary(reports),
     duplicates:
       duplicateDetails,
-
     bestTestProduct:
       selectBestTestProduct(
         reports,
@@ -1373,7 +1083,6 @@ export async function analyzeAmazonReadiness(
           minimumScore
         }
       ),
-
     reports
   };
 }
