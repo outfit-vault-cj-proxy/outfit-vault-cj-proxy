@@ -40,7 +40,7 @@ if (typeof getShopifyVariants !== "function") {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const SERVER_VERSION = "amazon-engine-v5";
+const SERVER_VERSION = "amazon-intelligence-upgrade-v2";
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -217,6 +217,207 @@ function responseStatus(data) {
   if (data?.success) return 200;
   if (Number.isInteger(data?.status)) return data.status;
   return 502;
+}
+
+/* =========================================================
+   AMAZON INTELLIGENCE AUTOMATION
+========================================================= */
+
+const AMAZON_INTELLIGENCE_TIME_ZONE =
+  process.env.AMAZON_INTELLIGENCE_TIME_ZONE ||
+  "America/New_York";
+
+const AMAZON_INTELLIGENCE_DAILY_HOUR = Number(
+  process.env.AMAZON_INTELLIGENCE_DAILY_HOUR || 3
+);
+
+const AMAZON_INTELLIGENCE_DAILY_MINUTE = Number(
+  process.env.AMAZON_INTELLIGENCE_DAILY_MINUTE || 0
+);
+
+const AMAZON_INTELLIGENCE_SCAN_LIMIT = Number(
+  process.env.AMAZON_INTELLIGENCE_SCAN_LIMIT || 5000
+);
+
+const AMAZON_INTELLIGENCE_MINIMUM_SCORE = Number(
+  process.env.AMAZON_INTELLIGENCE_MINIMUM_SCORE || 85
+);
+
+const AMAZON_INTELLIGENCE_INTERNAL_TIMEOUT_MS = Number(
+  process.env.AMAZON_INTELLIGENCE_INTERNAL_TIMEOUT_MS || 15 * 60 * 1000
+);
+
+let lastDailyAmazonIntelligenceRunKey = null;
+let dailyAmazonIntelligenceRunInProgress = false;
+
+function getTimeZoneParts(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: AMAZON_INTELLIGENCE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  });
+
+  const parts = Object.fromEntries(
+    formatter
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute)
+  };
+}
+
+function getDailyRunKey(parts) {
+  return [
+    parts.year,
+    String(parts.month).padStart(2, "0"),
+    String(parts.day).padStart(2, "0")
+  ].join("-");
+}
+
+async function callAmazonIntelligenceAnalysis({
+  productId = null,
+  maxVariants = AMAZON_INTELLIGENCE_SCAN_LIMIT,
+  minimumScore = AMAZON_INTELLIGENCE_MINIMUM_SCORE,
+  source = "internal"
+} = {}) {
+  const adminKey = String(process.env.ADMIN_API_KEY || "").trim();
+
+  if (!adminKey) {
+    return {
+      success: false,
+      skipped: true,
+      source,
+      error: "ADMIN_API_KEY is not configured"
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    AMAZON_INTELLIGENCE_INTERNAL_TIMEOUT_MS
+  );
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${PORT}/amazon-intelligence/analyze`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-key": adminKey
+        },
+        body: JSON.stringify({
+          ...(productId ? { productId } : {}),
+          maxVariants,
+          minimumScore,
+          checkPublished: true,
+          checkRestrictions: true,
+          automationSource: source
+        }),
+        signal: controller.signal
+      }
+    );
+
+    const data = await readJsonResponse(
+      response,
+      "Amazon Intelligence internal analysis"
+    );
+
+    return {
+      ...(data || {}),
+      success: Boolean(response.ok && data?.success),
+      status: response.status,
+      source,
+      productId
+    };
+  } catch (error) {
+    return {
+      success: false,
+      source,
+      productId,
+      error:
+        error?.name === "AbortError"
+          ? "Amazon Intelligence analysis timed out"
+          : error instanceof Error
+            ? error.message
+            : String(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runDailyAmazonIntelligenceScan() {
+  if (dailyAmazonIntelligenceRunInProgress) {
+    return;
+  }
+
+  dailyAmazonIntelligenceRunInProgress = true;
+
+  try {
+    const result = await callAmazonIntelligenceAnalysis({
+      maxVariants: AMAZON_INTELLIGENCE_SCAN_LIMIT,
+      minimumScore: AMAZON_INTELLIGENCE_MINIMUM_SCORE,
+      source: "daily-3am-eastern"
+    });
+
+    if (result.success) {
+      console.log(
+        "Amazon Intelligence daily scan completed:",
+        result.runId || "completed"
+      );
+    } else {
+      console.error(
+        "Amazon Intelligence daily scan failed:",
+        result.error || result
+      );
+    }
+  } finally {
+    dailyAmazonIntelligenceRunInProgress = false;
+  }
+}
+
+function startAmazonIntelligenceScheduler() {
+  const checkSchedule = () => {
+    const parts = getTimeZoneParts();
+    const runKey = getDailyRunKey(parts);
+
+    const isScheduledTime =
+      parts.hour === AMAZON_INTELLIGENCE_DAILY_HOUR &&
+      parts.minute === AMAZON_INTELLIGENCE_DAILY_MINUTE;
+
+    if (
+      isScheduledTime &&
+      lastDailyAmazonIntelligenceRunKey !== runKey
+    ) {
+      lastDailyAmazonIntelligenceRunKey = runKey;
+      void runDailyAmazonIntelligenceScan();
+    }
+  };
+
+  checkSchedule();
+
+  const timer = setInterval(checkSchedule, 60_000);
+  timer.unref?.();
+
+  console.log(
+    `Amazon Intelligence scheduler active: ${String(
+      AMAZON_INTELLIGENCE_DAILY_HOUR
+    ).padStart(2, "0")}:${String(
+      AMAZON_INTELLIGENCE_DAILY_MINUTE
+    ).padStart(2, "0")} ${AMAZON_INTELLIGENCE_TIME_ZONE}`
+  );
 }
 
 async function readJsonResponse(response, serviceName) {
@@ -649,6 +850,16 @@ app.get("/health", async (req, res) => {
       process.env
         .AMAZON_SPAPI_ENVIRONMENT ||
       "production",
+    amazonIntelligenceAutomation: {
+      immediateImportAnalysis: true,
+      dailySchedule: {
+        hour: AMAZON_INTELLIGENCE_DAILY_HOUR,
+        minute: AMAZON_INTELLIGENCE_DAILY_MINUTE,
+        timeZone: AMAZON_INTELLIGENCE_TIME_ZONE
+      },
+      scanLimit: AMAZON_INTELLIGENCE_SCAN_LIMIT,
+      minimumScore: AMAZON_INTELLIGENCE_MINIMUM_SCORE
+    },
     routes: {
       amazonEngine:
         "/amazon-engine",
@@ -1208,12 +1419,21 @@ app.post(
                 : String(error);
           }
 
+          const intelligenceAnalysis =
+            await callAmazonIntelligenceAnalysis({
+              productId: created.id,
+              maxVariants: 100,
+              minimumScore: AMAZON_INTELLIGENCE_MINIMUM_SCORE,
+              source: "shopify-import"
+            });
+
           imported.push({
             cjProductId,
             success: true,
             published,
             publishError,
-            shopifyProduct: created
+            shopifyProduct: created,
+            amazonIntelligence: intelligenceAnalysis
           });
         } catch (error) {
           imported.push({
@@ -2776,5 +2996,7 @@ app.listen(
     console.log(
       "Find and publish one: POST /amazon-engine/find-and-publish-one"
     );
+
+    startAmazonIntelligenceScheduler();
   }
 );
