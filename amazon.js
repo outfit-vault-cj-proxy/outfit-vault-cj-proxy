@@ -11,7 +11,8 @@ const LWA_TOKEN_URL =
 const DEFAULT_MARKETPLACE =
   "ATVPDKIKX0DER";
 
-const AMAZON_API_VERSION = "amazon-api-v2.2.2-pagesize-20";
+const AMAZON_API_VERSION =
+  "amazon-api-v2.2.3-catalog-images";
 
 const USER_AGENT =
   "TheOutfitVault/2.1 (Language=JavaScript; Platform=Node.js)";
@@ -610,38 +611,178 @@ function flattenCatalogIdentifiers(groups = []) {
   return identifiers;
 }
 
+function extractAmazonImages(item = {}, marketplaceId) {
+  const imageGroups = Array.isArray(item.images)
+    ? item.images
+    : Object.values(item.images || {});
+
+  const marketplaceGroup =
+    imageGroups.find(
+      (group) => group?.marketplaceId === marketplaceId
+    ) ||
+    imageGroups[0] ||
+    null;
+
+  const rawImages = Array.isArray(marketplaceGroup?.images)
+    ? marketplaceGroup.images
+    : [];
+
+  const normalizedImages = rawImages
+    .map((image) => ({
+      variant: image?.variant || image?.type || null,
+      link: image?.link || image?.url || null,
+      height: Number(image?.height) || null,
+      width: Number(image?.width) || null
+    }))
+    .filter((image) => Boolean(image.link));
+
+  const primaryImage =
+    normalizedImages.find(
+      (image) =>
+        String(image.variant || "").toUpperCase() === "MAIN"
+    ) ||
+    normalizedImages.find(
+      (image) =>
+        String(image.variant || "").toUpperCase() === "PT01"
+    ) ||
+    [...normalizedImages].sort((a, b) => {
+      const aArea =
+        Number(a.width || 0) * Number(a.height || 0);
+
+      const bArea =
+        Number(b.width || 0) * Number(b.height || 0);
+
+      return bArea - aArea;
+    })[0] ||
+    null;
+
+  return {
+    amazon_image: primaryImage?.link || null,
+
+    amazon_additional_images: normalizedImages
+      .filter((image) => image.link !== primaryImage?.link)
+      .map((image) => image.link),
+
+    amazon_images: normalizedImages,
+
+    image_section_present: Boolean(marketplaceGroup),
+
+    image_count: normalizedImages.length,
+
+    image_parse_status:
+      normalizedImages.length > 0
+        ? "found"
+        : marketplaceGroup
+          ? "empty"
+          : "missing"
+  };
+}
+
+function extractParentAsin(item = {}, marketplaceId) {
+  const relationshipGroup =
+    item.relationships?.find(
+      (entry) => entry?.marketplaceId === marketplaceId
+    ) ||
+    item.relationships?.[0] ||
+    null;
+
+  const relationships = Array.isArray(
+    relationshipGroup?.relationships
+  )
+    ? relationshipGroup.relationships
+    : [];
+
+  const variationRelationship = relationships.find(
+    (relationship) =>
+      String(relationship?.type || "").toUpperCase() ===
+      "VARIATION"
+  );
+
+  return variationRelationship?.parentAsins?.[0] || null;
+}
+
 function normalizeCatalogItem(item = {}) {
   const marketplaceId = getMarketplace();
 
   const summary =
     item.summaries?.find(
-      (entry) => entry.marketplaceId === marketplaceId
+      (entry) => entry?.marketplaceId === marketplaceId
     ) ||
     item.summaries?.[0] ||
     {};
 
   const productType =
     item.productTypes?.find(
-      (entry) => entry.marketplaceId === marketplaceId
+      (entry) => entry?.marketplaceId === marketplaceId
     ) ||
     item.productTypes?.[0] ||
     {};
 
-  const parentAsin =
-    item.relationships?.find(
-      (entry) => entry.marketplaceId === marketplaceId
-    )?.relationships?.find(
-      (relationship) => relationship.type === "VARIATION"
-    )?.parentAsins?.[0] ||
-    null;
+  const imageEvidence = extractAmazonImages(
+    item,
+    marketplaceId
+  );
 
   return {
     asin: item.asin || null,
-    parent_asin: parentAsin,
-    amazon_title: summary.itemName || null,
-    amazon_brand: summary.brand || null,
-    product_type: productType.productType || null,
-    identifiers: flattenCatalogIdentifiers(item.identifiers || [])
+
+    parent_asin: extractParentAsin(
+      item,
+      marketplaceId
+    ),
+
+    amazon_title:
+      summary.itemName ||
+      summary.itemNameText ||
+      null,
+
+    amazon_brand:
+      summary.brand ||
+      summary.manufacturer ||
+      null,
+
+    product_type:
+      productType.productType ||
+      null,
+
+    identifiers: flattenCatalogIdentifiers(
+      item.identifiers || []
+    ),
+
+    amazon_image:
+      imageEvidence.amazon_image,
+
+    amazon_additional_images:
+      imageEvidence.amazon_additional_images,
+
+    amazon_images:
+      imageEvidence.amazon_images,
+
+    marketplace_id:
+      marketplaceId,
+
+    evidence_source:
+      "amazon_sp_api_catalog_items",
+
+    evidence_retrieved_at:
+      new Date().toISOString(),
+
+    diagnostics: {
+      requested_included_data:
+        "summaries,identifiers,images,productTypes,classifications,relationships",
+
+      image_section_present:
+        imageEvidence.image_section_present,
+
+      image_count:
+        imageEvidence.image_count,
+
+      image_parse_status:
+        imageEvidence.image_parse_status,
+
+      marketplace_id:
+        marketplaceId
+    }
   };
 }
 
