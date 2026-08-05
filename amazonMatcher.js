@@ -1,7 +1,7 @@
 const DECISIONS = Object.freeze({
   AUTO_MATCH: "AUTO_MATCH",
   MANUAL_REVIEW: "MANUAL_REVIEW",
-  NO_SAFE_MATCH: "NO_SAFE_MATCH"
+  NO_SAFE_MATCH: "NO_SAFE_MATCH",
 });
 
 function normalizeText(value) {
@@ -32,7 +32,7 @@ function tokenize(value) {
   return new Set(
     normalized
       .split(" ")
-      .filter((token) => token.length > 1)
+      .filter((token) => token.length > 1),
   );
 }
 
@@ -54,12 +54,12 @@ function textSimilarity(left, right) {
   ) {
     const shorterLength = Math.min(
       leftText.length,
-      rightText.length
+      rightText.length,
     );
 
     const longerLength = Math.max(
       leftText.length,
-      rightText.length
+      rightText.length,
     );
 
     return Math.max(0.75, shorterLength / longerLength);
@@ -73,12 +73,12 @@ function textSimilarity(left, right) {
   }
 
   const intersection = [...leftTokens].filter((token) =>
-    rightTokens.has(token)
+    rightTokens.has(token),
   ).length;
 
   const union = new Set([
     ...leftTokens,
-    ...rightTokens
+    ...rightTokens,
   ]).size;
 
   return union ? intersection / union : 0;
@@ -104,19 +104,19 @@ function flattenCandidateIdentifiers(candidate) {
       marketplaceEntry?.identifiers ?? []
     ) {
       const type = String(
-        identifierEntry?.identifierType ?? ""
+        identifierEntry?.identifierType ?? "",
       )
         .trim()
         .toUpperCase();
 
       const value = normalizeIdentifier(
-        identifierEntry?.identifier
+        identifierEntry?.identifier,
       );
 
       if (type && value) {
         identifiers.push({
           type,
-          value
+          value,
         });
       }
     }
@@ -129,7 +129,7 @@ function identifiersAreEquivalent(
   submittedType,
   submittedValue,
   candidateType,
-  candidateValue
+  candidateValue,
 ) {
   const leftType = String(submittedType ?? "")
     .trim()
@@ -152,8 +152,10 @@ function identifiersAreEquivalent(
 
   // EAN-13 may represent a UPC-A with one leading zero.
   if (
-    ((leftType === "UPC" && rightType === "EAN") ||
-      (leftType === "EAN" && rightType === "UPC")) &&
+    (
+      (leftType === "UPC" && rightType === "EAN") ||
+      (leftType === "EAN" && rightType === "UPC")
+    ) &&
     leftValue.padStart(13, "0") ===
       rightValue.padStart(13, "0")
   ) {
@@ -173,16 +175,16 @@ function identifiersAreEquivalent(
 
 function findIdentifierMatch(
   sourceProduct,
-  candidate
+  candidate,
 ) {
   const submittedType = String(
-    sourceProduct?.identifierType ?? ""
+    sourceProduct?.identifierType ?? "",
   )
     .trim()
     .toUpperCase();
 
   const submittedValue = normalizeIdentifier(
-    sourceProduct?.identifier
+    sourceProduct?.identifier,
   );
 
   if (!submittedType || !submittedValue) {
@@ -197,7 +199,7 @@ function findIdentifierMatch(
       matched: true,
       submittedType,
       candidateType: "ASIN",
-      value: submittedValue
+      value: submittedValue,
     };
   }
 
@@ -210,14 +212,14 @@ function findIdentifierMatch(
         submittedType,
         submittedValue,
         entry.type,
-        entry.value
+        entry.value,
       )
     ) {
       return {
         matched: true,
         submittedType,
         candidateType: entry.type,
-        value: entry.value
+        value: entry.value,
       };
     }
   }
@@ -230,17 +232,17 @@ function addCriterion(
   name,
   sourceValue,
   candidateValue,
-  weight
+  weight,
 ) {
   const similarity = textSimilarity(
     sourceValue,
-    candidateValue
+    candidateValue,
   );
 
   if (similarity === null) {
     return {
       earned: 0,
-      available: 0
+      available: 0,
     };
   }
 
@@ -252,18 +254,18 @@ function addCriterion(
     candidateValue: candidateValue ?? null,
     similarity: Number(similarity.toFixed(4)),
     weight,
-    earned: Number(earned.toFixed(2))
+    earned: Number(earned.toFixed(2)),
   });
 
   return {
     earned,
-    available: weight
+    available: weight,
   };
 }
 
 export function scoreAmazonCandidate(
   sourceProduct,
-  candidate
+  candidate,
 ) {
   const criteria = [];
   const warnings = [];
@@ -273,7 +275,7 @@ export function scoreAmazonCandidate(
 
   const identifierMatch = findIdentifierMatch(
     sourceProduct,
-    candidate
+    candidate,
   );
 
   if (identifierMatch) {
@@ -282,7 +284,7 @@ export function scoreAmazonCandidate(
       similarity: 1,
       weight: 60,
       earned: 60,
-      details: identifierMatch
+      details: identifierMatch,
     });
 
     earnedPoints += 60;
@@ -300,8 +302,8 @@ export function scoreAmazonCandidate(
         submittedType:
           sourceProduct.identifierType,
         submittedValue:
-          sourceProduct.identifier
-      }
+          sourceProduct.identifier,
+      },
     });
 
     availablePoints += 60;
@@ -313,52 +315,52 @@ export function scoreAmazonCandidate(
       "title",
       sourceProduct?.title,
       candidate?.title,
-      20
+      20,
     ],
     [
       "brand",
       sourceProduct?.brand,
       candidate?.brand,
-      8
+      8,
     ],
     [
       "productType",
       sourceProduct?.productType,
       candidate?.productType,
-      5
+      5,
     ],
     [
       "color",
       sourceProduct?.color,
       candidate?.color,
-      3
+      3,
     ],
     [
       "size",
       sourceProduct?.size,
       candidate?.size,
-      2
+      2,
     ],
     [
       "modelNumber",
       sourceProduct?.modelNumber,
       candidate?.modelNumber,
-      2
-    ]
+      2,
+    ],
   ];
 
   for (const [
     name,
     sourceValue,
     candidateValue,
-    weight
+    weight,
   ] of comparisons) {
     const result = addCriterion(
       criteria,
       name,
       sourceValue,
       candidateValue,
-      weight
+      weight,
     );
 
     earnedPoints += result.earned;
@@ -368,7 +370,7 @@ export function scoreAmazonCandidate(
   if (
     valuesConflict(
       sourceProduct?.brand,
-      candidate?.brand
+      candidate?.brand,
     )
   ) {
     warnings.push("BRAND_CONFLICT");
@@ -378,7 +380,7 @@ export function scoreAmazonCandidate(
   if (
     valuesConflict(
       sourceProduct?.productType,
-      candidate?.productType
+      candidate?.productType,
     )
   ) {
     warnings.push("PRODUCT_TYPE_CONFLICT");
@@ -388,7 +390,7 @@ export function scoreAmazonCandidate(
   if (
     valuesConflict(
       sourceProduct?.color,
-      candidate?.color
+      candidate?.color,
     )
   ) {
     warnings.push("COLOR_CONFLICT");
@@ -402,7 +404,7 @@ export function scoreAmazonCandidate(
 
   const score = Math.max(
     0,
-    Math.min(100, Math.round(rawScore))
+    Math.min(100, Math.round(rawScore)),
   );
 
   let decision = DECISIONS.NO_SAFE_MATCH;
@@ -424,26 +426,26 @@ export function scoreAmazonCandidate(
     decision,
     identifierMatch: identifierMatch ?? null,
     warnings,
-    criteria
+    criteria,
   };
 }
 
 export function chooseBestAmazonMatch(
   sourceProduct,
-  candidates = []
+  candidates = [],
 ) {
   const scoredCandidates = candidates
     .map((candidate) => ({
       candidate,
       evaluation: scoreAmazonCandidate(
         sourceProduct,
-        candidate
-      )
+        candidate,
+      ),
     }))
     .sort(
       (left, right) =>
         right.evaluation.score -
-        left.evaluation.score
+        left.evaluation.score,
     );
 
   const best = scoredCandidates[0] ?? null;
@@ -454,7 +456,7 @@ export function chooseBestAmazonMatch(
       decision: DECISIONS.NO_SAFE_MATCH,
       bestMatch: null,
       alternatives: [],
-      reason: "NO_AMAZON_CANDIDATES"
+      reason: "NO_AMAZON_CANDIDATES",
     };
   }
 
@@ -478,14 +480,14 @@ export function chooseBestAmazonMatch(
       ...best.candidate,
       matchEvaluation: {
         ...best.evaluation,
-        decision: finalDecision
-      }
+        decision: finalDecision,
+      },
     },
     alternatives: scoredCandidates
       .slice(1, 4)
       .map(({ candidate, evaluation }) => ({
         ...candidate,
-        matchEvaluation: evaluation
+        matchEvaluation: evaluation,
       })),
     scoreGap,
     reason:
@@ -493,7 +495,7 @@ export function chooseBestAmazonMatch(
         ? "HIGH_CONFIDENCE_UNIQUE_MATCH"
         : finalDecision === DECISIONS.MANUAL_REVIEW
           ? "MATCH_REQUIRES_REVIEW"
-          : "NO_SAFE_MATCH"
+          : "NO_SAFE_MATCH",
   };
 }
 
