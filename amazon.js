@@ -642,3 +642,173 @@ export async function createOfferListing(product) {
 export async function createOffer(product) {
   return createOfferListing(product);
 }
+
+// ===== Compatibility exports required by the restored production server =====
+
+/** Backward-compatible alias used by older server routes. */
+export async function testConnection() {
+  return checkConnection();
+}
+
+/** Backward-compatible alias used by older order routes. */
+export async function getOrderItems(orderId) {
+  return getOrderItemsPaginated(orderId);
+}
+
+/**
+ * Backward-compatible catalog identifier helper.
+ * Supports either an object or positional arguments.
+ */
+export async function searchCatalogByIdentifier(
+  identifierOrOptions,
+  identifiersType = "UPC",
+  marketplaceId = getMarketplace(),
+) {
+  if (
+    identifierOrOptions &&
+    typeof identifierOrOptions === "object" &&
+    !Array.isArray(identifierOrOptions)
+  ) {
+    return searchByIdentifier(identifierOrOptions);
+  }
+
+  return searchByIdentifier({
+    identifier: identifierOrOptions,
+    identifiersType,
+    marketplaceId,
+  });
+}
+
+/**
+ * Read-only Listings Restrictions lookup for an existing Amazon catalog item.
+ * Amazon operation: GET /listings/2021-08-01/restrictions
+ */
+export async function getListingRestrictions(
+  asinOrOptions,
+  conditionType,
+  marketplaceId = getMarketplace(),
+) {
+  const options =
+    asinOrOptions && typeof asinOrOptions === "object"
+      ? asinOrOptions
+      : { asin: asinOrOptions, conditionType, marketplaceId };
+
+  const asin = assertNonEmptyString(
+    options.asin || options.amazon_asin,
+    "asin",
+  );
+
+  const query = {
+    asin,
+    sellerId: getSellerId(),
+    marketplaceIds: options.marketplaceId || marketplaceId || getMarketplace(),
+  };
+
+  if (options.conditionType || options.condition_type) {
+    query.conditionType = options.conditionType || options.condition_type;
+  }
+
+  const response = await spApiCall(
+    "GET",
+    "/listings/2021-08-01/restrictions",
+    query,
+  );
+
+  if (response.ok) {
+    return {
+      success: true,
+      asin,
+      restrictions: Array.isArray(response.data?.restrictions)
+        ? response.data.restrictions
+        : [],
+      data: response.data,
+      httpStatus: response.status,
+    };
+  }
+
+  return {
+    success: false,
+    asin,
+    restrictions: [],
+    httpStatus: response.status,
+    error:
+      typeof response.data === "string"
+        ? response.data
+        : JSON.stringify(response.data).slice(0, 4000),
+  };
+}
+
+/**
+ * Read-only offer preview. It validates required inputs and checks listing
+ * restrictions without creating or changing an Amazon offer.
+ */
+export async function previewOfferListing(product = {}) {
+  try {
+    const asin = assertNonEmptyString(
+      product.asin || product.amazon_asin,
+      "asin",
+    );
+    const sku = assertNonEmptyString(
+      product.amazon_sku || product.sku || product.shopify_variant_id,
+      "sku",
+    );
+
+    const numericPrice = Number(product.price);
+    if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
+      throw new Error("price must be a positive number");
+    }
+
+    const quantity = Number(product.quantity ?? 0);
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      throw new Error("quantity must be a non-negative integer");
+    }
+
+    const restrictionResult = await getListingRestrictions({
+      asin,
+      conditionType: product.condition_type || "new_new",
+      marketplaceId: product.marketplaceId || getMarketplace(),
+    });
+
+    if (!restrictionResult.success) {
+      return {
+        success: false,
+        stage: "RESTRICTIONS_CHECK",
+        status: restrictionResult.httpStatus || 502,
+        sku,
+        asin,
+        error: restrictionResult.error || "Restrictions check failed.",
+        restrictions: restrictionResult,
+        externalWritesPerformed: 0,
+      };
+    }
+
+    const blockingRestrictions = restrictionResult.restrictions.filter(
+      (restriction) => restriction?.reasons?.some(
+        (reason) => reason?.reasonCode || reason?.message,
+      ),
+    );
+
+    return {
+      success: blockingRestrictions.length === 0,
+      stage: blockingRestrictions.length === 0
+        ? "VALIDATION_PREVIEW"
+        : "RESTRICTED",
+      status: blockingRestrictions.length === 0 ? 200 : 422,
+      sku,
+      asin,
+      price: numericPrice,
+      quantity,
+      restrictions: restrictionResult.restrictions,
+      issues: blockingRestrictions,
+      externalWritesPerformed: 0,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      stage: "INVALID",
+      status: 400,
+      error: error instanceof Error ? error.message : String(error),
+      externalWritesPerformed: 0,
+    };
+  }
+}
