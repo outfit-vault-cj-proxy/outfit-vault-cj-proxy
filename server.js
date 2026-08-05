@@ -47,8 +47,6 @@ function assertString(value, field) {
   return out;
 }
 
-const assertNonEmptyString = assertString;
-
 function checkCreds() {
   const required = [
     "AMAZON_LWA_CLIENT_ID",
@@ -516,7 +514,12 @@ export async function exchangeAuthCode(code, redirectUri) {
   const response = await fetch(LWA_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
   const data = await response.json();
   if (!response.ok || !data.refresh_token) throw new Error("Amazon authorization-code exchange failed.");
-  return { refresh_token: data.refresh_token };
+  return {
+    refresh_token: data.refresh_token,
+    access_token: data.access_token || null,
+    expires_in: data.expires_in || null,
+    token_type: data.token_type || null,
+  };
 }
 
 export function normalizeUpc(value) {
@@ -653,193 +656,89 @@ export async function createOffer(product) {
   return createOfferListing(product);
 }
 
-// ===== Compatibility exports required by the restored production server =====
 
-/** Backward-compatible alias used by older server routes. */
+// ===== Backward-compatible production server exports =====
 export async function testConnection() {
   return checkConnection();
 }
 
-/** Backward-compatible alias used by older order routes. */
 export async function getOrderItems(orderId) {
   return getOrderItemsPaginated(orderId);
 }
 
-/**
- * Backward-compatible catalog identifier helper.
- * Supports either an object or positional arguments.
- */
-export async function searchCatalogByIdentifier(
-  identifierOrOptions,
-  identifiersType = "UPC",
-  marketplaceId = getMarketplace(),
-) {
-  if (
-    identifierOrOptions &&
-    typeof identifierOrOptions === "object" &&
-    !Array.isArray(identifierOrOptions)
-  ) {
-    const result = await searchByIdentifier(identifierOrOptions);
-    return {
-      ...result,
-      matches: Array.isArray(result?.matches)
-        ? result.matches
-        : Array.isArray(result?.items)
-          ? result.items
-          : [],
-    };
-  }
-
+export async function searchCatalogByIdentifier(identifier, identifiersType = "ASIN") {
   const result = await searchByIdentifier({
-    identifier: identifierOrOptions,
+    identifier,
     identifiersType,
-    marketplaceId,
+    marketplaceId: getMarketplace(),
   });
   return {
     ...result,
-    matches: Array.isArray(result?.matches)
-      ? result.matches
-      : Array.isArray(result?.items)
-        ? result.items
-        : [],
+    matches: Array.isArray(result?.items) ? result.items : [],
   };
 }
 
-/**
- * Read-only Listings Restrictions lookup for an existing Amazon catalog item.
- * Amazon operation: GET /listings/2021-08-01/restrictions
- */
-export async function getListingRestrictions(
-  asinOrOptions,
-  conditionType,
-  marketplaceId = getMarketplace(),
-) {
-  const options =
-    asinOrOptions && typeof asinOrOptions === "object"
-      ? asinOrOptions
-      : { asin: asinOrOptions, conditionType, marketplaceId };
-
-  const asin = assertNonEmptyString(
-    options.asin || options.amazon_asin,
-    "asin",
-  );
-
-  const query = {
-    asin,
-    sellerId: getSellerId(),
-    marketplaceIds: options.marketplaceId || marketplaceId || getMarketplace(),
-  };
-
-  if (options.conditionType || options.condition_type) {
-    query.conditionType = options.conditionType || options.condition_type;
-  }
-
-  const response = await spApiCall(
-    "GET",
-    "/listings/2021-08-01/restrictions",
-    query,
-  );
-
-  if (response.ok) {
-    const restrictions = Array.isArray(response.data?.restrictions)
-      ? response.data.restrictions
-      : [];
-    return {
-      success: true,
-      asin,
-      eligible: restrictions.length === 0,
-      restrictions,
-      data: response.data,
-      httpStatus: response.status,
-      status: response.status,
-    };
-  }
-
-  return {
-    success: false,
-    asin,
-    restrictions: [],
-    httpStatus: response.status,
-    status: response.status,
-    eligible: null,
-    error:
-      typeof response.data === "string"
-        ? response.data
-        : JSON.stringify(response.data).slice(0, 4000),
-  };
-}
-
-/**
- * Read-only offer preview. It validates required inputs and checks listing
- * restrictions without creating or changing an Amazon offer.
- */
-export async function previewOfferListing(product = {}) {
-  try {
-    const asin = assertNonEmptyString(
-      product.asin || product.amazon_asin,
-      "asin",
-    );
-    const sku = assertNonEmptyString(
-      product.amazon_sku || product.sku || product.shopify_variant_id,
-      "sku",
-    );
-
-    const numericPrice = Number(product.price);
-    if (!Number.isFinite(numericPrice) || numericPrice <= 0) {
-      throw new Error("price must be a positive number");
-    }
-
-    const quantity = Number(product.quantity ?? 0);
-    if (!Number.isInteger(quantity) || quantity < 0) {
-      throw new Error("quantity must be a non-negative integer");
-    }
-
-    const restrictionResult = await getListingRestrictions({
-      asin,
-      conditionType: product.condition_type || "new_new",
-      marketplaceId: product.marketplaceId || getMarketplace(),
-    });
-
-    if (!restrictionResult.success) {
-      return {
-        success: false,
-        stage: "RESTRICTIONS_CHECK",
-        status: restrictionResult.httpStatus || 502,
-        sku,
-        asin,
-        error: restrictionResult.error || "Restrictions check failed.",
-        restrictions: restrictionResult,
-        externalWritesPerformed: 0,
-      };
-    }
-
-    const blockingRestrictions = restrictionResult.restrictions.filter(
-      (restriction) => restriction?.reasons?.some(
-        (reason) => reason?.reasonCode || reason?.message,
-      ),
-    );
-
-    return {
-      success: blockingRestrictions.length === 0,
-      stage: blockingRestrictions.length === 0
-        ? "VALIDATION_PREVIEW"
-        : "RESTRICTED",
-      status: blockingRestrictions.length === 0 ? 200 : 422,
-      sku,
-      asin,
-      price: numericPrice,
-      quantity,
-      restrictions: restrictionResult.restrictions,
-      issues: blockingRestrictions,
-      externalWritesPerformed: 0,
-    };
-  } catch (error) {
+export async function getListingRestrictions(asin, conditionType = "new_new") {
+  const normalizedAsin = assertString(asin, "asin").trim().toUpperCase();
+  if (!/^[A-Z0-9]{10}$/.test(normalizedAsin)) {
     return {
       success: false,
-      stage: "INVALID",
       status: 400,
-      error: error instanceof Error ? error.message : String(error),
-      externalWritesPerformed: 0,
+      eligible: null,
+      restrictions: [],
+      error_code: "INVALID_ASIN",
+      error: "ASIN must contain exactly 10 letters or numbers.",
     };
   }
+  const response = await spApiCall("GET", "/listings/2021-08-01/restrictions", {
+    asin: normalizedAsin,
+    sellerId: assertString(getSellerId(), "AMAZON_SELLER_ID"),
+    marketplaceIds: getMarketplace(),
+    conditionType: String(conditionType || "new_new"),
+  });
+  if (!response.ok) {
+    return {
+      success: false,
+      status: response.status,
+      eligible: null,
+      restrictions: [],
+      error_code: "AMAZON_RESTRICTIONS_REQUEST_FAILED",
+      error: typeof response.data === "string"
+        ? response.data
+        : JSON.stringify(response.data).slice(0, 4000),
+    };
+  }
+  const restrictions = Array.isArray(response.data?.restrictions)
+    ? response.data.restrictions
+    : [];
+  return {
+    success: true,
+    status: response.status,
+    asin: normalizedAsin,
+    conditionType: String(conditionType || "new_new"),
+    eligible: restrictions.length === 0,
+    restrictions,
+  };
+}
+
+// Read-only preview. It checks listing restrictions and performs no listing write.
+export async function previewOfferListing(product = {}) {
+  const asin = product.asin || product.amazon_asin;
+  const conditionType = product.condition_type || product.conditionType || "new_new";
+  const restrictions = await getListingRestrictions(asin, conditionType);
+  return {
+    ...restrictions,
+    stage: restrictions.success
+      ? (restrictions.eligible ? "ELIGIBLE" : "RESTRICTED")
+      : "RESTRICTION_CHECK_ERROR",
+    readOnly: true,
+    externalWritesPerformed: 0,
+    preview: {
+      asin: asin ? String(asin).trim().toUpperCase() : null,
+      sku: product.sku || product.amazon_sku || null,
+      price: product.price ?? null,
+      quantity: product.quantity ?? null,
+      conditionType,
+    },
+  };
 }
