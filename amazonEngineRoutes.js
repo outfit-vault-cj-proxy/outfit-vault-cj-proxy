@@ -40,8 +40,8 @@ POST   /amazon-engine/find-and-publish-one
 DELETE /amazon-engine/results 
 = */
 
-const ROUTER_VERSION =
-  "amazon-engine-v6-auto-publish";
+const ROUTER_VERSION = 
+"amazon-engine-routes-v3";
 
 const DEFAULT_MINIMUM_READY_SCORE = 85;
 
@@ -78,15 +78,15 @@ value,
 fallback 
 ) { 
 if ( 
-value = undefined || 
-value = null || 
-value = "" 
+value === undefined || 
+value === null || 
+value === "" 
 ) { 
 return fallback; 
 }
 
 if ( 
-typeof value = "boolean" 
+typeof value === "boolean" 
 ) { 
 return value; 
 }
@@ -140,7 +140,7 @@ let normalized =
 number;
 
 if ( 
-minimum ! null 
+minimum !== null 
 ) { 
 normalized = 
 Math.max( 
@@ -150,7 +150,7 @@ normalized
 }
 
 if ( 
-maximum ! null 
+maximum !== null 
 ) { 
 normalized = 
 Math.min( 
@@ -222,8 +222,8 @@ variant.barcode
 ] 
 .filter( 
 (value) => 
-value ! undefined && 
-value ! null 
+value !== undefined && 
+value !== null 
 ) 
 .map( 
 (value) => 
@@ -335,7 +335,7 @@ req
 
 if ( 
 !providedKey || 
-providedKey ! 
+providedKey !==
 configuredKey 
 ) { 
 return sendError( 
@@ -599,37 +599,39 @@ router.get(
         error: null
       };
 
-      if (typeof checkConnection === "function") {
-        try {
-          const result = await checkConnection();
-
-          connection = {
-            connected: result?.connected === true,
-            marketplace_id: result?.marketplace_id || null,
-            seller_id_present: result?.seller_id_present === true,
-            lwa_token_generated: result?.lwa_token_generated === true,
-            spapi_test_succeeded: result?.spapi_test_succeeded === true,
-            error: result?.error || null
-          };
-        } catch (error) {
-          connection.error =
-            error instanceof Error
-              ? error.message
-              : String(error);
+      try {
+        if (typeof checkConnection !== "function") {
+          throw new Error(
+            "checkConnection was not provided to the Amazon engine router"
+          );
         }
-      } else {
+
+        const result = await checkConnection();
+
+        connection = {
+          connected: result?.connected === true,
+          marketplace_id: result?.marketplace_id || null,
+          seller_id_present: result?.seller_id_present === true,
+          lwa_token_generated: result?.lwa_token_generated === true,
+          spapi_test_succeeded:
+            result?.spapi_test_succeeded === true,
+          error: result?.error || null
+        };
+      } catch (error) {
         connection.error =
-          "checkConnection was not provided to the Amazon engine router";
+          error instanceof Error
+            ? error.message
+            : String(error);
       }
 
       return res.status(200).json({
         ...engineState,
-        version: ROUTER_VERSION,
+        version: "amazon-engine-v6-auto-publish",
         connection
       });
     } catch (error) {
       return sendError(res, 500, error, {
-        version: ROUTER_VERSION
+        version: "amazon-engine-v6-auto-publish"
       });
     }
   }
