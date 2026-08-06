@@ -40,7 +40,7 @@ if (typeof getShopifyVariants !== "function") {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const SERVER_VERSION = "amazon-engine-v5-duplicate-protection";
+const SERVER_VERSION = "amazon-engine-v6-auto-publish-sync";
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -1829,8 +1829,9 @@ app.post(
        * Amazon seller SKUs are the source of truth. Before any new offer
        * submission, look up the exact seller SKU in the Listings Items API.
        *
-       * - Existing SKU: block the new submission.
-       * - Confirmed 404: SKU does not exist, so publishing may continue.
+       * - Existing SKU with the same ASIN: update price and inventory.
+       * - Existing SKU with a different ASIN: block the request.
+       * - Confirmed 404: SKU does not exist, so create a new offer.
        * - Any other lookup failure: fail closed so an outage or permission
        *   error cannot accidentally create a duplicate.
        */
@@ -1849,27 +1850,76 @@ app.post(
           existingListing?.data?.summaries;
 
         const existingAsin =
-          Array.isArray(existingSummaries) &&
-          existingSummaries.length > 0
-            ? existingSummaries[0]?.asin || null
-            : existingListing?.data?.asin || null;
+          (
+            Array.isArray(existingSummaries) &&
+            existingSummaries.length > 0
+              ? existingSummaries[0]?.asin
+              : existingListing?.data?.asin
+          ) || null;
 
-        return res.status(409).json({
-          success: false,
-          action: "BLOCKED_DUPLICATE",
-          duplicatePrevented: true,
-          stage: "DUPLICATE_SKU",
-          error:
-            "This seller SKU already exists in your Amazon inventory. No new offer was submitted.",
-          endpoint: "/amazon/offer/create",
-          sku: sellerSku,
-          submittedAsin:
-            String(product.asin || "")
-              .trim()
-              .toUpperCase() || null,
-          existingAsin,
-          existingListing
-        });
+        const submittedAsin =
+          String(product.asin || "")
+            .trim()
+            .toUpperCase() || null;
+
+        if (
+          existingAsin &&
+          submittedAsin &&
+          String(existingAsin)
+            .trim()
+            .toUpperCase() !== submittedAsin
+        ) {
+          return res.status(409).json({
+            success: false,
+            action: "BLOCKED_ASIN_MISMATCH",
+            duplicatePrevented: true,
+            stage: "EXISTING_SKU_ASIN_MISMATCH",
+            error:
+              "This seller SKU already exists, but it is attached to a different ASIN. Automatic updating was blocked.",
+            endpoint: "/amazon/offer/create",
+            sku: sellerSku,
+            submittedAsin,
+            existingAsin,
+            existingListing
+          });
+        }
+
+        const priceResult =
+          await syncPrice(
+            sellerSku,
+            product.price
+          );
+
+        const inventoryResult =
+          await syncInventory(
+            sellerSku,
+            product.quantity
+          );
+
+        const syncSucceeded =
+          Boolean(priceResult?.success) &&
+          Boolean(inventoryResult?.success);
+
+        return res
+          .status(syncSucceeded ? 200 : 502)
+          .json({
+            success: syncSucceeded,
+            action: syncSucceeded
+              ? "UPDATED_EXISTING"
+              : "EXISTING_SYNC_FAILED",
+            duplicatePrevented: true,
+            stage: syncSucceeded
+              ? "SYNCED"
+              : "SYNC_ERROR",
+            endpoint: "/amazon/offer/create",
+            sku: sellerSku,
+            asin: existingAsin || submittedAsin,
+            price: Number(product.price),
+            quantity: Number(product.quantity),
+            priceResult,
+            inventoryResult,
+            existingListing
+          });
       }
 
       const duplicateLookupStatus =
@@ -2034,7 +2084,7 @@ app.get(
     name="viewport"
     content="width=device-width, initial-scale=1"
   >
-  <title>Publish to Amazon</title>
+  <title>Auto Publish or Sync to Amazon</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -2100,11 +2150,10 @@ app.get(
 </head>
 <body>
   <main class="card">
-    <h1>Publish to Amazon</h1>
+    <h1>Auto Publish or Sync</h1>
 
     <div class="warning">
-      This submits a real Amazon offer.
-      Review every field before publishing.
+      New SKU: creates an Amazon offer. Existing SKU: updates price and quantity. Review every field.
     </div>
 
     <label for="asin">Amazon ASIN</label>
@@ -2196,7 +2245,7 @@ app.get(
 
         if (
           !window.confirm(
-            "Submit a real Amazon offer for " +
+            "Auto publish or sync " +
             asin +
             " at $" +
             price.toFixed(2) +
@@ -2242,7 +2291,7 @@ app.get(
 
           publishButton.textContent =
             data.success
-              ? "Submitted"
+              ? (data.action === "UPDATED_EXISTING" ? "Updated Existing" : "Submitted New")
               : "Try Again";
         } catch (error) {
           resultBox.textContent =
