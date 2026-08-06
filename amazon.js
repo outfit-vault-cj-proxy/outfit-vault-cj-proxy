@@ -1257,7 +1257,12 @@ async function putOfferOnlyListing(product) {
     },
   };
 
-  const response = await spApiCall("PUT", path, {}, body);
+  const response = await spApiCall(
+    "PUT",
+    path,
+    { marketplaceIds: getMarketplace() },
+    body,
+  );
 
   return {
     response,
