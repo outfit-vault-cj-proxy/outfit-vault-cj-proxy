@@ -25,7 +25,8 @@ searchCatalogByIdentifier,
 searchCatalogItems,
 getListingRestrictions,
   previewOfferListing,
-  createOfferListing
+  createOfferListing,
+  getAllAmazonListings
 } from "./amazon.js";
 
 const getShopifyVariants =
@@ -50,7 +51,6 @@ app.use(express.urlencoded({ extended: false }));
    AMAZON ENGINE ROUTER
 ========================================================= */
 
-
 app.use(
   "/amazon-engine",
   createAmazonEngineRouter({
@@ -58,6 +58,13 @@ app.use(
     checkConnection
   })
 );
+
+app.use(
+  "/amazon-intelligence",
+  createAmazonIntelligenceRouter({
+    getShopifyVariants
+  })
+  );
 app.use(
   createAmazonMatchRouter({
     searchCatalogItems,
@@ -212,6 +219,32 @@ function responseStatus(data) {
   if (data?.success) return 200;
   if (Number.isInteger(data?.status)) return data.status;
   return 502;
+}
+
+function requireAmazonAdmin(req, res, next) {
+  const expected = String(
+    process.env.AMAZON_AUTH_SECRET || "",
+  ).trim();
+
+  const provided = String(
+    req.headers["x-admin-key"] || "",
+  ).trim();
+
+  if (!expected) {
+    return res.status(503).json({
+      success: false,
+      error: "AMAZON_AUTH_SECRET is not configured",
+    });
+  }
+
+  if (!provided || provided !== expected) {
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized",
+    });
+  }
+
+  next();
 }
 
 async function readJsonResponse(response, serviceName) {
@@ -1262,6 +1295,60 @@ app.get(
       jsonError(res, 500, error);
     }
   }
+);
+
+app.get(
+  "/amazon/listings/all",
+  requireAmazonAdmin,
+  async (req, res) => {
+    try {
+      const maxPages = Math.max(
+        1,
+        Math.min(
+          Number(req.query.maxPages) || 100,
+          500,
+        ),
+      );
+
+      const maxRetries = Math.max(
+        0,
+        Math.min(
+          Number(req.query.maxRetries) || 4,
+          8,
+        ),
+      );
+
+      const result =
+        await getAllAmazonListings({
+          maxPages,
+          maxRetries,
+        });
+
+      return res
+        .status(
+          result?.success
+            ? 200
+            : Number.isInteger(result?.httpStatus)
+              ? result.httpStatus
+              : 502,
+        )
+        .json({
+          ...result,
+          endpoint: "/amazon/listings/all",
+          serverVersion: SERVER_VERSION,
+        });
+    } catch (error) {
+      return jsonError(
+        res,
+        500,
+        error,
+        {
+          endpoint: "/amazon/listings/all",
+          serverVersion: SERVER_VERSION,
+        },
+      );
+    }
+  },
 );
 function isValidGtinCheckDigit(value) {
   const digits = String(value)
@@ -2892,4 +2979,3 @@ app.listen(
       "Find and publish one: POST /amazon-engine/find-and-publish-one"
     );
   }
-);
