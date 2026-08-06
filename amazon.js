@@ -1206,14 +1206,34 @@ async function putOfferOnlyListing(product) {
     getSellerId(),
     "AMAZON_SELLER_ID",
   );
+
   const sku =
     product.amazon_sku ||
     product.sku ||
     `OV-${product.id || Date.now()}`;
+
   const asin = assertString(
     product.asin || product.amazon_asin,
     "asin",
-  );
+  )
+    .trim()
+    .toUpperCase();
+
+  const price = Number(product.price);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(
+      "price must be a number greater than zero",
+    );
+  }
+
+  const quantity = Number(product.quantity);
+
+  if (!Number.isInteger(quantity) || quantity < 0) {
+    throw new Error(
+      "quantity must be a whole number of zero or greater",
+    );
+  }
 
   const path =
     `/listings/2021-08-01/items/${encodeURIComponent(
@@ -1234,10 +1254,14 @@ async function putOfferOnlyListing(product) {
         {
           marketplace_id: getMarketplace(),
           currency: "USD",
+          audience: "ALL",
           our_price: [
             {
-              amount: String(product.price || 0),
-              currency_code: "USD",
+              schedule: [
+                {
+                  value_with_tax: price,
+                },
+              ],
             },
           ],
         },
@@ -1245,7 +1269,7 @@ async function putOfferOnlyListing(product) {
       fulfillment_availability: [
         {
           fulfillment_channel_code: "DEFAULT",
-          quantity: Number(product.quantity) || 0,
+          quantity,
         },
       ],
       condition_type: [
@@ -1260,7 +1284,9 @@ async function putOfferOnlyListing(product) {
   const response = await spApiCall(
     "PUT",
     path,
-    { marketplaceIds: getMarketplace() },
+    {
+      marketplaceIds: getMarketplace(),
+    },
     body,
   );
 
