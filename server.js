@@ -50,19 +50,14 @@ app.use(express.urlencoded({ extended: false }));
    AMAZON ENGINE ROUTER
 ========================================================= */
 
+
 app.use(
   "/amazon-engine",
   createAmazonEngineRouter({
-    getShopifyVariants
+    getShopifyVariants,
+    checkConnection
   })
 );
-
-app.use(
-  "/amazon-intelligence",
-  createAmazonIntelligenceRouter({
-    getShopifyVariants
-  })
-  );
 app.use(
   createAmazonMatchRouter({
     searchCatalogItems,
