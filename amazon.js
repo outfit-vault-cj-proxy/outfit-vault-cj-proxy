@@ -1,9 +1,5 @@
-import crypto from "node:crypto";
-
 const SPAPI_HOST = "sellingpartnerapi-na.amazon.com";
-const SPAPI_REGION = "us-east-1";
 const LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token";
-const STS_URL = "https://sts.amazonaws.com/";
 const DEFAULT_MARKETPLACE = "ATVPDKIKX0DER";
 const ORDER_PAGE_LIMIT = 100;
 const MAX_ORDER_PAGES = 50;
@@ -12,31 +8,6 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 let cachedLWAToken = null;
 let lwaExpiresAt = 0;
-let cachedRoleCreds = null;
-let roleCredsExpiresAt = 0;
-
-function hmac(key, data) {
-  return crypto.createHmac("sha256", key).update(data).digest();
-}
-
-function sha256Hex(data) {
-  return crypto.createHash("sha256").update(data).digest("hex");
-}
-
-function uriEncode(value, encodeSlash = true) {
-  let result = encodeURIComponent(String(value))
-    .replace(/!/g, "%21")
-    .replace(/'/g, "%27")
-    .replace(/\*/g, "%2A")
-    .replace(/\(/g, "%28")
-    .replace(/\)/g, "%29");
-
-  if (!encodeSlash) {
-    result = result.replace(/%2F/g, "/");
-  }
-
-  return result;
-}
 
 function getMarketplace() {
   return process.env.AMAZON_MARKETPLACE_ID || DEFAULT_MARKETPLACE;
@@ -61,13 +32,12 @@ function checkCreds() {
     "AMAZON_LWA_CLIENT_ID",
     "AMAZON_LWA_CLIENT_SECRET",
     "AMAZON_LWA_REFRESH_TOKEN",
-    "AMAZON_SPAPI_ACCESS_KEY",
-    "AMAZON_SPAPI_SECRET_KEY",
-    "AMAZON_SPAPI_ROLE_ARN",
     "AMAZON_SELLER_ID",
   ];
 
-  const missing = required.filter((key) => !process.env[key]);
+  const missing = required.filter(
+    (key) => !String(process.env[key] || "").trim(),
+  );
 
   if (missing.length > 0) {
     throw new Error(`Missing Amazon env vars: ${missing.join(", ")}`);
@@ -129,152 +99,8 @@ async function getLWAToken() {
   return cachedLWAToken;
 }
 
-function sigv4Sign(
-  method,
-  url,
-  headers,
-  body,
-  accessKey,
-  secretKey,
-  sessionToken,
-  region,
-  service,
-) {
-  const urlObject = new URL(url);
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
-
-  const normalizedHeaders = {};
-
-  for (const [key, value] of Object.entries({
-    host: urlObject.host,
-    "x-amz-date": amzDate,
-    ...headers,
-  })) {
-    normalizedHeaders[key.toLowerCase()] = String(value).trim();
-  }
-
-  if (sessionToken) {
-    normalizedHeaders["x-amz-security-token"] = sessionToken;
-  }
-
-  const sortedHeaderKeys = Object.keys(normalizedHeaders).sort();
-  const canonicalHeaders = sortedHeaderKeys
-    .map((key) => `${key}:${normalizedHeaders[key]}\n`)
-    .join("");
-  const signedHeaders = sortedHeaderKeys.join(";");
-  const payloadHash = sha256Hex(body || "");
-
-  const queryPairs = [];
-
-  for (const [key, value] of urlObject.searchParams.entries()) {
-    queryPairs.push(`${uriEncode(key)}=${uriEncode(value)}`);
-  }
-
-  queryPairs.sort();
-
-  const canonicalRequest = [
-    method.toUpperCase(),
-    uriEncode(urlObject.pathname, false) || "/",
-    queryPairs.join("&"),
-    canonicalHeaders,
-    signedHeaders,
-    payloadHash,
-  ].join("\n");
-
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    credentialScope,
-    sha256Hex(canonicalRequest),
-  ].join("\n");
-
-  const kDate = hmac(`AWS4${secretKey}`, dateStamp);
-  const kRegion = hmac(kDate, region);
-  const kService = hmac(kRegion, service);
-  const kSigning = hmac(kService, "aws4_request");
-  const signature = crypto
-    .createHmac("sha256", kSigning)
-    .update(stringToSign)
-    .digest("hex");
-
-  return {
-    ...normalizedHeaders,
-    authorization:
-      `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, ` +
-      `SignedHeaders=${signedHeaders}, Signature=${signature}`,
-    "x-amz-content-sha256": payloadHash,
-  };
-}
-
-async function assumeRole() {
-  if (cachedRoleCreds && Date.now() < roleCredsExpiresAt) {
-    return cachedRoleCreds;
-  }
-
-  checkCreds();
-
-  const body =
-    `Action=AssumeRole&Version=2011-06-15&RoleArn=${encodeURIComponent(
-      process.env.AMAZON_SPAPI_ROLE_ARN,
-    )}` +
-    "&RoleSessionName=OutfitVaultSession&DurationSeconds=3600";
-
-  const headers = sigv4Sign(
-    "POST",
-    STS_URL,
-    { "content-type": "application/x-www-form-urlencoded" },
-    body,
-    process.env.AMAZON_SPAPI_ACCESS_KEY,
-    process.env.AMAZON_SPAPI_SECRET_KEY,
-    null,
-    "us-east-1",
-    "sts",
-  );
-
-  const response = await fetch(STS_URL, {
-    method: "POST",
-    headers,
-    body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-
-  const xml = await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `STS AssumeRole failed (${response.status}): ${xml.slice(0, 2000)}`,
-    );
-  }
-
-  const accessKeyId = xml.match(/<AccessKeyId>([^<]+)<\/AccessKeyId>/)?.[1];
-  const secretAccessKey = xml.match(
-    /<SecretAccessKey>([^<]+)<\/SecretAccessKey>/,
-  )?.[1];
-  const sessionToken = xml.match(/<SessionToken>([^<]+)<\/SessionToken>/)?.[1];
-  const expiration = xml.match(/<Expiration>([^<]+)<\/Expiration>/)?.[1];
-
-  if (!accessKeyId || !secretAccessKey || !sessionToken || !expiration) {
-    throw new Error("STS response parse failed");
-  }
-
-  cachedRoleCreds = {
-    accessKeyId,
-    secretAccessKey,
-    sessionToken,
-  };
-
-  roleCredsExpiresAt =
-    new Date(expiration).getTime() - 5 * 60 * 1000;
-
-  return cachedRoleCreds;
-}
-
 async function spApiCall(method, path, query = {}, body = null) {
   const lwaToken = await getLWAToken();
-  const role = await assumeRole();
   const params = new URLSearchParams();
 
   for (const [key, value] of Object.entries(query || {})) {
@@ -282,7 +108,15 @@ async function spApiCall(method, path, query = {}, body = null) {
       continue;
     }
 
-    params.append(key, String(value));
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (entry !== undefined && entry !== null && entry !== "") {
+          params.append(key, String(entry));
+        }
+      }
+    } else {
+      params.append(key, String(value));
+    }
   }
 
   const queryString = params.toString();
@@ -291,32 +125,25 @@ async function spApiCall(method, path, query = {}, body = null) {
     (queryString ? `?${queryString}` : "");
 
   const bodyString =
-    body === null || body === undefined ? "" : JSON.stringify(body);
+    body === null || body === undefined
+      ? null
+      : JSON.stringify(body);
 
   const headers = {
+    Accept: "application/json",
     "x-amz-access-token": lwaToken,
+    "User-Agent":
+      "TheOutfitVault/1.0 (Language=JavaScript; Platform=Railway)",
   };
 
-  if (bodyString) {
-    headers["content-type"] = "application/json";
+  if (bodyString !== null) {
+    headers["Content-Type"] = "application/json";
   }
 
-  const signedHeaders = sigv4Sign(
-    method,
-    url,
-    headers,
-    bodyString,
-    role.accessKeyId,
-    role.secretAccessKey,
-    role.sessionToken,
-    SPAPI_REGION,
-    "execute-api",
-  );
-
   const response = await fetch(url, {
-    method,
-    headers: signedHeaders,
-    body: bodyString || undefined,
+    method: String(method).toUpperCase(),
+    headers,
+    body: bodyString,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
