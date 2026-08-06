@@ -33,7 +33,7 @@ const getShopifyVariants =
 shopifyVariantsModule.getShopifyVariants || 
 shopifyVariantsModule.default;
 
-if (typeof getShopifyVariants ! "function") { 
+if (typeof getShopifyVariants !== "function") {
 throw new Error( 
 "shopifyVariants.js must export getShopifyVariants as a named or default export." 
 ); 
