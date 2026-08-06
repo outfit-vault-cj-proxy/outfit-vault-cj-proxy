@@ -40,7 +40,7 @@ if (typeof getShopifyVariants !== "function") {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const SERVER_VERSION = "amazon-engine-v5";
+const SERVER_VERSION = "amazon-engine-v5-duplicate-protection";
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -1821,6 +1821,77 @@ app.post(
           error: "Product price is required",
           endpoint: "/amazon/offer/create",
           receivedProduct: product
+        });
+      }
+
+      /*
+       * Duplicate protection:
+       * Amazon seller SKUs are the source of truth. Before any new offer
+       * submission, look up the exact seller SKU in the Listings Items API.
+       *
+       * - Existing SKU: block the new submission.
+       * - Confirmed 404: SKU does not exist, so publishing may continue.
+       * - Any other lookup failure: fail closed so an outage or permission
+       *   error cannot accidentally create a duplicate.
+       */
+      const sellerSku = String(
+        product.amazon_sku ||
+        product.sku ||
+        product.shopify_variant_id ||
+        ""
+      ).trim();
+
+      const existingListing =
+        await getListingStatus(sellerSku);
+
+      if (existingListing?.success) {
+        const existingSummaries =
+          existingListing?.data?.summaries;
+
+        const existingAsin =
+          Array.isArray(existingSummaries) &&
+          existingSummaries.length > 0
+            ? existingSummaries[0]?.asin || null
+            : existingListing?.data?.asin || null;
+
+        return res.status(409).json({
+          success: false,
+          action: "BLOCKED_DUPLICATE",
+          duplicatePrevented: true,
+          stage: "DUPLICATE_SKU",
+          error:
+            "This seller SKU already exists in your Amazon inventory. No new offer was submitted.",
+          endpoint: "/amazon/offer/create",
+          sku: sellerSku,
+          submittedAsin:
+            String(product.asin || "")
+              .trim()
+              .toUpperCase() || null,
+          existingAsin,
+          existingListing
+        });
+      }
+
+      const duplicateLookupStatus =
+        Number(existingListing?.httpStatus);
+
+      if (
+        duplicateLookupStatus !== 404
+      ) {
+        return res.status(502).json({
+          success: false,
+          action: "DUPLICATE_CHECK_FAILED",
+          duplicatePrevented: true,
+          stage: "DUPLICATE_CHECK_ERROR",
+          error:
+            "Amazon could not confirm whether this seller SKU already exists. Publishing was stopped to prevent a possible duplicate.",
+          endpoint: "/amazon/offer/create",
+          sku: sellerSku,
+          lookupStatus:
+            Number.isFinite(duplicateLookupStatus)
+              ? duplicateLookupStatus
+              : null,
+          lookupResult: existingListing
         });
       }
 
