@@ -187,12 +187,13 @@ const CJ_BASE =
 const SHOPIFY_API_VERSION = 
 process.env.SHOPIFY_API_VERSION || "2026-07";
 
-const SHOPIFY_STORE_DOMAIN = String( 
-process.env.SHOPIFY_STORE_DOMAIN || "" 
-) 
-.trim() 
-.replace(/^https?:///i, "") 
-.replace(//+$/, "");
+const SHOPIFY_STORE_DOMAIN = String(
+  process.env.SHOPIFY_STORE_DOMAIN || ""
+)
+  .trim()
+  .replace(/^https?:\/\//i, "")
+  .replace(/\/+$/, "");
+.
 
 const SHOPIFY_CLIENT_ID = 
 process.env.SHOPIFY_CLIENT_ID;
