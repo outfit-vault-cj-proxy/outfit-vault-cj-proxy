@@ -1075,256 +1075,6 @@ export async function searchCatalogByIdentifier(
   };
 }
 
-
-function wait(milliseconds) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-async function searchListingsPage({
-  sellerId,
-  marketplaceId,
-  pageToken = null,
-  retryCount = 0,
-  maxRetries = 4,
-}) {
-  const query = {
-    marketplaceIds: marketplaceId,
-    includedData:
-      "summaries,issues,offers,fulfillmentAvailability,productTypes",
-    issueLocale: "en_US",
-    sortBy: "sku",
-    sortOrder: "ASC",
-    pageSize: 20,
-  };
-
-  if (pageToken) {
-    query.pageToken = pageToken;
-  }
-
-  const response = await spApiCall(
-    "GET",
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
-    query,
-  );
-
-  if (
-    [429, 500, 503].includes(response.status) &&
-    retryCount < maxRetries
-  ) {
-    const delayMs =
-      Math.min(8_000, 750 * 2 ** retryCount) +
-      Math.floor(Math.random() * 250);
-
-    await wait(delayMs);
-
-    return searchListingsPage({
-      sellerId,
-      marketplaceId,
-      pageToken,
-      retryCount: retryCount + 1,
-      maxRetries,
-    });
-  }
-
-  return response;
-}
-
-function normalizeAmazonListingItem(item, marketplaceId) {
-  const summaries = Array.isArray(item?.summaries)
-    ? item.summaries
-    : [];
-
-  const summary =
-    summaries.find(
-      (entry) => entry?.marketplaceId === marketplaceId,
-    ) ||
-    summaries[0] ||
-    {};
-
-  const fulfillmentAvailability =
-    Array.isArray(item?.fulfillmentAvailability)
-      ? item.fulfillmentAvailability
-      : [];
-
-  const quantity = fulfillmentAvailability.reduce(
-    (total, entry) => {
-      const value = Number(entry?.quantity);
-
-      return total + (Number.isFinite(value) ? value : 0);
-    },
-    0,
-  );
-
-  const status = Array.isArray(item?.status)
-    ? item.status.map((value) => String(value))
-    : [];
-
-  const issues = Array.isArray(item?.issues)
-    ? item.issues
-    : [];
-
-  const offers = Array.isArray(item?.offers)
-    ? item.offers
-    : [];
-
-  const productTypes = Array.isArray(item?.productTypes)
-    ? item.productTypes
-    : [];
-
-  return {
-    sellerSku: String(item?.sku || "").trim(),
-    asin: summary?.asin || null,
-    status,
-    quantity,
-    fulfillmentChannel:
-      fulfillmentAvailability[0]?.fulfillmentChannelCode ||
-      fulfillmentAvailability[0]?.fulfillment_channel_code ||
-      null,
-    fulfillmentAvailability,
-    issues,
-    offers,
-    productTypes,
-    marketplaceId,
-    createdDate: item?.createdDate || null,
-    lastUpdatedDate: item?.lastUpdatedDate || null,
-  };
-}
-
-export async function getAllAmazonListings({
-  maxPages = 100,
-  maxRetries = 4,
-} = {}) {
-  const sellerId = assertString(
-    getSellerId(),
-    "AMAZON_SELLER_ID",
-  );
-
-  const marketplaceId = getMarketplace();
-
-  const safeMaxPages = Math.max(
-    1,
-    Math.min(Number(maxPages) || 100, 500),
-  );
-
-  const safeMaxRetries = Math.max(
-    0,
-    Math.min(Number(maxRetries) || 4, 8),
-  );
-
-  const rawItems = [];
-  let pageToken = null;
-  let pagesFetched = 0;
-
-  do {
-    if (pagesFetched >= safeMaxPages) {
-      const partialListings = rawItems.map((item) =>
-        normalizeAmazonListingItem(item, marketplaceId),
-      );
-
-      return {
-        success: false,
-        error_code: "AMAZON_LISTING_PAGE_LIMIT_REACHED",
-        error: `Stopped after ${safeMaxPages} pages before Amazon pagination was exhausted.`,
-        httpStatus: 422,
-        marketplaceId,
-        sellerIdPresent: true,
-        connectionVerified: true,
-        pagesFetched,
-        recordsFetched: partialListings.length,
-        uniqueSellerSkus: new Set(
-          partialListings
-            .map((item) => item.sellerSku.toUpperCase())
-            .filter(Boolean),
-        ).size,
-        duplicateSellerSkus: 0,
-        nextPageToken: pageToken,
-        listings: partialListings,
-      };
-    }
-
-    const response = await searchListingsPage({
-      sellerId,
-      marketplaceId,
-      pageToken,
-      maxRetries: safeMaxRetries,
-    });
-
-    if (!response.ok) {
-      return {
-        success: false,
-        error_code: "AMAZON_LISTINGS_SEARCH_FAILED",
-        error: resultError(response.data),
-        httpStatus: response.status,
-        marketplaceId,
-        sellerIdPresent: true,
-        connectionVerified: true,
-        pagesFetched,
-        recordsFetched: rawItems.length,
-        uniqueSellerSkus: new Set(
-          rawItems
-            .map((item) => String(item?.sku || "").trim().toUpperCase())
-            .filter(Boolean),
-        ).size,
-        duplicateSellerSkus: 0,
-        nextPageToken: pageToken,
-        listings: rawItems.map((item) =>
-          normalizeAmazonListingItem(item, marketplaceId),
-        ),
-      };
-    }
-
-    const pageItems = Array.isArray(response.data?.items)
-      ? response.data.items
-      : [];
-
-    rawItems.push(...pageItems);
-    pagesFetched += 1;
-
-    pageToken =
-      response.data?.pagination?.nextToken ||
-      response.data?.pagination?.nextPageToken ||
-      null;
-  } while (pageToken);
-
-  const listings = rawItems.map((item) =>
-    normalizeAmazonListingItem(item, marketplaceId),
-  );
-
-  const skuCounts = new Map();
-
-  for (const listing of listings) {
-    const normalizedSku = listing.sellerSku.toUpperCase();
-
-    if (!normalizedSku) continue;
-
-    skuCounts.set(
-      normalizedSku,
-      (skuCounts.get(normalizedSku) || 0) + 1,
-    );
-  }
-
-  const duplicateSellerSkus = [...skuCounts.values()].filter(
-    (count) => count > 1,
-  ).length;
-
-  return {
-    success: true,
-    readOnly: true,
-    externalWritesPerformed: 0,
-    marketplaceId,
-    sellerIdPresent: true,
-    connectionVerified: true,
-    pagesFetched,
-    recordsFetched: listings.length,
-    uniqueSellerSkus: skuCounts.size,
-    duplicateSellerSkus,
-    nextPageToken: null,
-    listings,
-  };
-}
-
 export async function getProductTypeDefinition(
   productType = "PANTS",
 ) {
@@ -1456,34 +1206,14 @@ async function putOfferOnlyListing(product) {
     getSellerId(),
     "AMAZON_SELLER_ID",
   );
-
   const sku =
     product.amazon_sku ||
     product.sku ||
     `OV-${product.id || Date.now()}`;
-
   const asin = assertString(
     product.asin || product.amazon_asin,
     "asin",
-  )
-    .trim()
-    .toUpperCase();
-
-  const price = Number(product.price);
-
-  if (!Number.isFinite(price) || price <= 0) {
-    throw new Error(
-      "price must be a number greater than zero",
-    );
-  }
-
-  const quantity = Number(product.quantity);
-
-  if (!Number.isInteger(quantity) || quantity < 0) {
-    throw new Error(
-      "quantity must be a whole number of zero or greater",
-    );
-  }
+  );
 
   const path =
     `/listings/2021-08-01/items/${encodeURIComponent(
@@ -1504,14 +1234,10 @@ async function putOfferOnlyListing(product) {
         {
           marketplace_id: getMarketplace(),
           currency: "USD",
-          audience: "ALL",
           our_price: [
             {
-              schedule: [
-                {
-                  value_with_tax: price,
-                },
-              ],
+              amount: String(product.price || 0),
+              currency_code: "USD",
             },
           ],
         },
@@ -1519,7 +1245,7 @@ async function putOfferOnlyListing(product) {
       fulfillment_availability: [
         {
           fulfillment_channel_code: "DEFAULT",
-          quantity,
+          quantity: Number(product.quantity) || 0,
         },
       ],
       condition_type: [
@@ -1534,9 +1260,7 @@ async function putOfferOnlyListing(product) {
   const response = await spApiCall(
     "PUT",
     path,
-    {
-      marketplaceIds: getMarketplace(),
-    },
+    { marketplaceIds: getMarketplace() },
     body,
   );
 
