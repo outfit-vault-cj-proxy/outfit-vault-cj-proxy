@@ -1,10 +1,18 @@
-const SPAPI_HOST = "sellingpartnerapi-na.amazon.com";
-const LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token";
-const DEFAULT_MARKETPLACE = "ATVPDKIKX0DER";
-const ORDER_PAGE_LIMIT = 100;
-const MAX_ORDER_PAGES = 50;
-const MAX_ITEM_PAGES = 50;
-const REQUEST_TIMEOUT_MS = 30_000;
+/* eslint-env node */
+/* global process, fetch */
+
+const SPAPI_HOST =
+  process.env.AMAZON_SPAPI_HOST ||
+  "sellingpartnerapi-na.amazon.com";
+
+const LWA_TOKEN_URL =
+  "https://api.amazon.com/auth/o2/token";
+
+const DEFAULT_MARKETPLACE =
+  "ATVPDKIKX0DER";
+
+const USER_AGENT =
+  "TheOutfitVault/2.0 (Language=JavaScript; Platform=Node.js)";
 
 let cachedLWAToken = null;
 let lwaExpiresAt = 0;
@@ -17,335 +25,245 @@ function getSellerId() {
   return process.env.AMAZON_SELLER_ID;
 }
 
-function assertString(value, field) {
-  const output = String(value ?? "").trim();
-
-  if (!output) {
-    throw new Error(`${field} is required`);
-  }
-
-  return output;
-}
-
-function checkCreds() {
+function checkLwaCredentials() {
   const required = [
     "AMAZON_LWA_CLIENT_ID",
-    "AMAZON_LWA_CLIENT_SECRET",
-    "AMAZON_LWA_REFRESH_TOKEN",
-    "AMAZON_SELLER_ID",
+    "AMAZON_LWA_CLIENT_SECRET"
   ];
 
-  const missing = required.filter(
-    (key) => !String(process.env[key] || "").trim(),
-  );
+  const missing = required.filter((key) => !process.env[key]);
 
   if (missing.length > 0) {
     throw new Error(`Missing Amazon env vars: ${missing.join(", ")}`);
   }
 }
 
-async function readJsonSafely(response) {
-  const text = await response.text();
+function checkRuntimeCredentials() {
+  const required = [
+    "AMAZON_LWA_CLIENT_ID",
+    "AMAZON_LWA_CLIENT_SECRET",
+    "AMAZON_LWA_REFRESH_TOKEN",
+    "AMAZON_SELLER_ID"
+  ];
 
-  if (!text) {
-    return null;
-  }
+  const missing = required.filter((key) => !process.env[key]);
 
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
+  if (missing.length > 0) {
+    throw new Error(`Missing Amazon env vars: ${missing.join(", ")}`);
   }
 }
 
-async function getLWAToken() {
-  if (cachedLWAToken && Date.now() < lwaExpiresAt) {
+async function getLWAToken(forceRefresh = false) {
+  checkRuntimeCredentials();
+
+  if (
+    !forceRefresh &&
+    cachedLWAToken &&
+    Date.now() < lwaExpiresAt - 60_000
+  ) {
     return cachedLWAToken;
   }
-
-  checkCreds();
 
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: process.env.AMAZON_LWA_REFRESH_TOKEN,
     client_id: process.env.AMAZON_LWA_CLIENT_ID,
-    client_secret: process.env.AMAZON_LWA_CLIENT_SECRET,
+    client_secret: process.env.AMAZON_LWA_CLIENT_SECRET
   });
 
   const response = await fetch(LWA_TOKEN_URL, {
     method: "POST",
     headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      Accept: "application/json"
     },
-    body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    body: body.toString()
   });
 
-  const data = await readJsonSafely(response);
+  const responseText = await response.text();
+  let data;
 
-  if (!response.ok || !data?.access_token) {
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(`Amazon LWA returned invalid JSON: ${responseText}`);
+  }
+
+  if (!response.ok || !data.access_token) {
     throw new Error(
-      `LWA token failed (${response.status}): ${
-        typeof data === "string" ? data : JSON.stringify(data)
-      }`,
+      `Amazon LWA token failed (${response.status}): ${JSON.stringify(data)}`
     );
   }
 
   cachedLWAToken = data.access_token;
-  lwaExpiresAt =
-    Date.now() +
-    (Math.max(60, Number(data.expires_in || 3600)) - 60) * 1000;
-
+  const expiresIn = Number(data.expires_in) || 3600;
+  lwaExpiresAt = Date.now() + expiresIn * 1000;
   return cachedLWAToken;
 }
 
-async function spApiCall(method, path, query = {}, body = null) {
-  const lwaToken = await getLWAToken();
+function buildQueryString(query = {}) {
   const params = new URLSearchParams();
 
-  for (const [key, value] of Object.entries(query || {})) {
-    if (value === undefined || value === null || value === "") {
-      continue;
-    }
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === "") continue;
 
     if (Array.isArray(value)) {
-      for (const entry of value) {
-        if (entry !== undefined && entry !== null && entry !== "") {
-          params.append(key, String(entry));
-        }
-      }
+      for (const item of value) params.append(key, String(item));
     } else {
       params.append(key, String(value));
     }
   }
 
-  const queryString = params.toString();
+  return params.toString();
+}
+
+async function spApiCall(
+  method,
+  path,
+  query = {},
+  body = null,
+  allowTokenRetry = true
+) {
+  const lwaToken = await getLWAToken();
+  const queryString = buildQueryString(query);
+
   const url =
     `https://${SPAPI_HOST}${path}` +
     (queryString ? `?${queryString}` : "");
 
-  const bodyString =
-    body === null || body === undefined
-      ? null
-      : JSON.stringify(body);
-
   const headers = {
     Accept: "application/json",
     "x-amz-access-token": lwaToken,
-    "User-Agent":
-      "TheOutfitVault/1.0 (Language=JavaScript; Platform=Railway)",
+    "user-agent": USER_AGENT
   };
 
-  if (bodyString !== null) {
+  let requestBody;
+
+  if (body !== null) {
     headers["Content-Type"] = "application/json";
+    requestBody = JSON.stringify(body);
   }
 
   const response = await fetch(url, {
-    method: String(method).toUpperCase(),
+    method,
     headers,
-    body: bodyString,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    body: requestBody
   });
+
+  if (
+    (response.status === 401 || response.status === 403) &&
+    allowTokenRetry
+  ) {
+    cachedLWAToken = null;
+    lwaExpiresAt = 0;
+    await getLWAToken(true);
+
+    return spApiCall(method, path, query, body, false);
+  }
+
+  const responseText = await response.text();
+  let data = null;
+
+  if (responseText) {
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      data = responseText;
+    }
+  }
 
   return {
     ok: response.ok,
     status: response.status,
-    data: await readJsonSafely(response),
+    data
   };
 }
 
-function mapProductType(category) {
-  const map = {
-    Tops: "SHIRT",
-    Bottoms: "PANTS",
-    Dresses: "DRESS",
-    Shoes: "SHOE",
-    Accessories: "ACCESSORY",
-    Outerwear: "OUTERWEAR",
-  };
+function amazonError(result) {
+  if (typeof result.data === "string") return result.data;
 
-  return map[category] || "PRODUCT";
+  return JSON.stringify(
+    result.data || {
+      message: "Unknown Amazon error"
+    }
+  );
 }
 
-function normalizeAlphaSize(value) {
-  const normalized = String(value || "").trim().toUpperCase();
+function normalizeSku(value) {
+  const sku = String(value || "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Za-z0-9._-]/g, "")
+    .slice(0, 40);
 
-  const map = {
-    "EXTRA SMALL": "xs",
-    XS: "xs",
-    SMALL: "s",
-    S: "s",
-    MEDIUM: "m",
-    M: "m",
-    LARGE: "l",
-    L: "l",
-    "EXTRA LARGE": "xl",
-    XL: "xl",
-    XXL: "xxl",
-    "2XL": "xxl",
-    XXXL: "xxxl",
-    "3XL": "xxxl",
-    "4XL": "xxxxl",
-  };
-
-  return map[normalized] || normalized.toLowerCase();
+  if (!sku) throw new Error("A valid seller SKU is required");
+  return sku;
 }
 
-function buildListingBody(product) {
-  const marketplaceId = getMarketplace();
-  const productType = mapProductType(product.category);
+function normalizeAsin(value) {
+  const asin = String(value || "").trim().toUpperCase();
 
-  const attributes = {
-    item_name: [
-      {
-        value: String(product.product_name || product.title || "").slice(0, 200),
-        marketplace_id: marketplaceId,
-        language_tag: "en_US",
-      },
-    ],
-    brand: [
-      {
-        value: product.brand || "The Outfit Vault",
-      },
-    ],
-    fulfillment_availability: [
-      {
-        fulfillment_channel_code: "DEFAULT",
-        quantity: Number(product.inventory_quantity ?? product.quantity) || 0,
-      },
-    ],
-    purchasable_offer: [
-      {
-        marketplace_id: marketplaceId,
-        currency: "USD",
-        our_price: [
-          {
-            amount: String(product.sale_price || product.price || 0),
-            currency_code: "USD",
-          },
-        ],
-      },
-    ],
-  };
-
-  if (product.description) {
-    attributes.item_description = [
-      {
-        value: String(product.description).slice(0, 2000),
-        marketplace_id: marketplaceId,
-        language_tag: "en_US",
-      },
-    ];
+  if (!/^[A-Z0-9]{10}$/.test(asin)) {
+    throw new Error("A valid 10-character ASIN is required");
   }
 
-  const images = Array.isArray(product.product_images)
-    ? [...new Set(product.product_images.filter(Boolean))]
-    : [];
-
-  if (images[0]) {
-    attributes.main_product_image_locator = [
-      {
-        marketplace_id: marketplaceId,
-        value: images[0],
-      },
-    ];
-  }
-
-  if (images[1]) {
-    attributes.other_product_image_locator_1 = [
-      {
-        marketplace_id: marketplaceId,
-        value: images[1],
-      },
-    ];
-  }
-
-  const size = product.size ? normalizeAlphaSize(product.size) : null;
-
-  if (size && ["PANTS", "SHORTS", "SKIRT"].includes(productType)) {
-    attributes.bottoms_size = [
-      {
-        marketplace_id: marketplaceId,
-        size_system: product.size_system || "us",
-        size_class: product.size_class || "alpha",
-        size,
-      },
-    ];
-  }
-
-  if (
-    size &&
-    ["SHIRT", "SWEATER", "T_SHIRT", "OUTERWEAR", "DRESS"].includes(productType)
-  ) {
-    attributes.shirt_size = [
-      {
-        marketplace_id: marketplaceId,
-        size_system: product.size_system || "us",
-        size_class: product.size_class || "alpha",
-        size,
-      },
-    ];
-  }
-
-  if (product.upc) {
-    attributes.externally_assigned_product_identifier = [
-      {
-        type: "upc",
-        value: String(product.upc),
-      },
-    ];
-  }
-
-  return {
-    productType,
-    requirements: "LISTING",
-    attributes,
-  };
+  return asin;
 }
 
-function resultError(data) {
-  return typeof data === "string"
-    ? data
-    : JSON.stringify(data ?? {}).slice(0, 4000);
+function normalizeMoney(value) {
+  const price = Number(value);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error("A valid price greater than zero is required");
+  }
+
+  return Number(price.toFixed(2));
+}
+
+function normalizeQuantity(value) {
+  const quantity = Number(value);
+  if (!Number.isFinite(quantity)) return 0;
+  return Math.max(0, Math.floor(quantity));
+}
+
+function getProductSku(product = {}) {
+  return normalizeSku(
+    product.amazon_sku ||
+      product.sku ||
+      (product.shopify_variant_id
+        ? `OV-${String(product.shopify_variant_id).split("/").pop()}`
+        : `OV-${product.id || Date.now()}`)
+  );
 }
 
 export async function checkConnection() {
-  const result = {
-    connected: false,
-    marketplace_id: getMarketplace(),
-    seller_id_present: Boolean(getSellerId()),
-    lwa_token_generated: false,
-    spapi_test_succeeded: false,
-  };
-
   try {
-    await getLWAToken();
-    result.lwa_token_generated = true;
+    checkRuntimeCredentials();
 
-    const response = await spApiCall("GET", "/orders/v0/orders", {
-      MarketplaceIds: getMarketplace(),
-      CreatedAfter: new Date(Date.now() - 7 * 86_400_000).toISOString(),
-    });
+    const result = await spApiCall(
+      "GET",
+      "/sellers/v1/marketplaceParticipations"
+    );
 
-    if (!response.ok) {
+    if (!result.ok) {
       return {
-        ...result,
-        error_code: "AMAZON_SPAPI_REQUEST_FAILED",
-        error: "Amazon SP-API read-only test failed.",
-        httpStatus: response.status,
+        success: false,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
       };
     }
 
     return {
-      ...result,
-      connected: true,
-      spapi_test_succeeded: true,
+      success: true,
+      seller_id: getSellerId(),
+      marketplace: getMarketplace(),
+      participations: result.data?.payload || []
     };
   } catch (error) {
     return {
-      ...result,
-      error_code: "AMAZON_CONNECTION_FAILED",
-      error: error instanceof Error ? error.message : String(error),
+      success: false,
+      error: error.message
     };
   }
 }
@@ -354,955 +272,1402 @@ export async function testConnection() {
   return checkConnection();
 }
 
-export async function publishListing(product) {
-  const sellerId = assertString(getSellerId(), "AMAZON_SELLER_ID");
-  const sku =
-    product.amazon_sku ||
-    product.sku ||
-    `OV-${assertString(product.id, "product.id")}`;
-
-  const path =
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/` +
-    encodeURIComponent(sku);
-
-  const response = await spApiCall(
-    "PUT",
-    path,
-    {},
-    buildListingBody(product),
-  );
-
-  const data = response.data || {};
-  const issues = Array.isArray(data.issues) ? data.issues : [];
-
-  return {
-    success: response.ok && issues.length === 0,
-    sku,
-    status: data.status || (response.ok ? "LISTED" : "ERROR"),
-    issues,
-    submissionId: data.submissionId || null,
-    httpStatus: response.status,
-    error: response.ok ? null : resultError(data),
-  };
-}
-
-export async function syncInventory(sku, quantity) {
-  const sellerId = assertString(getSellerId(), "AMAZON_SELLER_ID");
-  const safeSku = assertString(sku, "sku");
-
-  const path =
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/` +
-    encodeURIComponent(safeSku);
-
-  const body = {
-    productType: "PRODUCT",
-    requirements: "LISTING",
-    attributes: {
-      fulfillment_availability: [
-        {
-          fulfillment_channel_code: "DEFAULT",
-          quantity: Number(quantity) || 0,
-        },
-      ],
-    },
-  };
-
-  const response = await spApiCall(
-    "PATCH",
-    path,
-    { mode: "PARTIAL" },
-    body,
-  );
-
-  return response.ok
-    ? {
-        success: true,
-        sku: safeSku,
-        quantity: Number(quantity) || 0,
-      }
-    : {
-        success: false,
-        sku: safeSku,
-        httpStatus: response.status,
-        error: resultError(response.data),
-      };
-}
-
-export async function syncPrice(sku, price) {
-  const sellerId = assertString(getSellerId(), "AMAZON_SELLER_ID");
-  const safeSku = assertString(sku, "sku");
-
-  const path =
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/` +
-    encodeURIComponent(safeSku);
-
-  const body = {
-    productType: "PRODUCT",
-    requirements: "LISTING",
-    attributes: {
-      purchasable_offer: [
-        {
-          marketplace_id: getMarketplace(),
-          currency: "USD",
-          our_price: [
-            {
-              amount: String(price),
-              currency_code: "USD",
-            },
-          ],
-        },
-      ],
-    },
-  };
-
-  const response = await spApiCall(
-    "PATCH",
-    path,
-    { mode: "PARTIAL" },
-    body,
-  );
-
-  return response.ok
-    ? {
-        success: true,
-        sku: safeSku,
-        price,
-      }
-    : {
-        success: false,
-        sku: safeSku,
-        httpStatus: response.status,
-        error: resultError(response.data),
-      };
-}
-
-export async function getListingStatus(sku) {
-  const sellerId = assertString(getSellerId(), "AMAZON_SELLER_ID");
-  const safeSku = assertString(sku, "sku");
-
-  const path =
-    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}/` +
-    encodeURIComponent(safeSku);
-
-  const response = await spApiCall("GET", path, {
-    marketplaceIds: getMarketplace(),
-    includedData:
-      "summaries,issues,offers,fulfillmentAvailability",
-  });
-
-  return response.ok
-    ? {
-        success: true,
-        sku: safeSku,
-        data: response.data,
-      }
-    : {
-        success: false,
-        sku: safeSku,
-        httpStatus: response.status,
-        error: resultError(response.data),
-      };
-}
-
-export async function getOrdersPaginated({
-  createdAfter,
-  lastUpdatedAfter,
-  maxPages = MAX_ORDER_PAGES,
-} = {}) {
-  if (createdAfter && lastUpdatedAfter) {
-    throw new Error("Use createdAfter or lastUpdatedAfter, not both");
-  }
-
-  const baseQuery = {
-    MarketplaceIds: getMarketplace(),
-    MaxResultsPerPage: ORDER_PAGE_LIMIT,
-  };
-
-  if (lastUpdatedAfter) {
-    baseQuery.LastUpdatedAfter = new Date(lastUpdatedAfter).toISOString();
-  } else {
-    baseQuery.CreatedAfter = new Date(
-      createdAfter || Date.now() - 7 * 86_400_000,
-    ).toISOString();
-  }
-
-  const orders = [];
-  let nextToken = null;
-  let pageCount = 0;
-
-  do {
-    if (pageCount >= maxPages) {
-      return {
-        success: false,
-        error_code: "AMAZON_ORDER_PAGE_LIMIT_REACHED",
-        error: `Stopped after ${maxPages} pages.`,
-        orders,
-        nextToken,
-        pageCount,
-      };
-    }
-
-    const response = await spApiCall(
-      "GET",
-      "/orders/v0/orders",
-      nextToken ? { NextToken: nextToken } : baseQuery,
-    );
-
-    if (!response.ok) {
-      return {
-        success: false,
-        error_code: "AMAZON_ORDERS_REQUEST_FAILED",
-        httpStatus: response.status,
-        orders,
-        nextToken,
-        pageCount,
-        error: resultError(response.data),
-      };
-    }
-
-    const payload = response.data?.payload || {};
-    orders.push(
-      ...(Array.isArray(payload.Orders) ? payload.Orders : []),
-    );
-    nextToken = payload.NextToken || null;
-    pageCount += 1;
-  } while (nextToken);
-
-  return {
-    success: true,
-    orders,
-    nextToken: null,
-    pageCount,
-  };
-}
-
-export async function getOrders(createdAfter) {
-  return getOrdersPaginated({ createdAfter });
-}
-
-export async function getOrderItemsPaginated(
-  orderId,
-  { maxPages = MAX_ITEM_PAGES } = {},
+export async function searchCatalogByIdentifier(
+  identifier,
+  identifierType = "UPC"
 ) {
-  const safeOrderId = assertString(orderId, "orderId");
-  const path =
-    `/orders/v0/orders/${encodeURIComponent(safeOrderId)}/orderItems`;
+  try {
+    checkRuntimeCredentials();
 
-  const items = [];
-  let nextToken = null;
-  let pageCount = 0;
-
-  do {
-    if (pageCount >= maxPages) {
+    if (!identifier) {
       return {
         success: false,
-        error_code: "AMAZON_ORDER_ITEM_PAGE_LIMIT_REACHED",
-        error: `Stopped after ${maxPages} pages.`,
-        orderId: safeOrderId,
-        items,
-        nextToken,
-        pageCount,
+        error: "Product identifier is required"
       };
     }
 
-    const response = await spApiCall(
-      "GET",
-      path,
-      nextToken ? { NextToken: nextToken } : {},
-    );
+    const normalizedIdentifier = String(identifier)
+      .trim()
+      .replace(/\s+/g, "");
 
-    if (!response.ok) {
+    const normalizedType = String(identifierType)
+      .trim()
+      .toUpperCase();
+
+    const allowedTypes = new Set([
+      "ASIN",
+      "EAN",
+      "GTIN",
+      "ISBN",
+      "JAN",
+      "MINSAN",
+      "SKU",
+      "UPC"
+    ]);
+
+    if (!allowedTypes.has(normalizedType)) {
       return {
         success: false,
-        error_code: "AMAZON_ORDER_ITEMS_REQUEST_FAILED",
-        httpStatus: response.status,
-        orderId: safeOrderId,
-        items,
-        nextToken,
-        pageCount,
-        error: resultError(response.data),
+        error: `Unsupported identifier type: ${normalizedType}`
       };
     }
 
-    const payload = response.data?.payload || {};
-    items.push(
-      ...(Array.isArray(payload.OrderItems)
-        ? payload.OrderItems
-        : []),
-    );
-    nextToken = payload.NextToken || null;
-    pageCount += 1;
-  } while (nextToken);
-
-  return {
-    success: true,
-    orderId: safeOrderId,
-    items,
-    nextToken: null,
-    pageCount,
-  };
-}
-
-export async function getOrderItems(orderId) {
-  return getOrderItemsPaginated(orderId);
-}
-
-function normalizeAmazonCarrier(carrier) {
-  const raw = String(carrier || "").trim();
-  const upper = raw.toUpperCase();
-
-  const known = new Map([
-    ["UPS", "UPS"],
-    ["USPS", "USPS"],
-    ["FEDEX", "FedEx"],
-    ["FED EX", "FedEx"],
-    ["DHL", "DHL"],
-    ["DHL ECOMMERCE", "DHL eCommerce"],
-    ["ONTRAC", "OnTrac"],
-    ["LASERSHIP", "LaserShip"],
-    ["AMAZON LOGISTICS", "Amazon Logistics"],
-  ]);
-
-  const code = known.get(upper);
-
-  return code
-    ? {
-        carrierCode: code,
-        carrierName: code,
-      }
-    : {
-        carrierCode: "Other",
-        carrierName: raw || "Other",
-      };
-}
-
-export async function confirmAmazonShipment({
-  orderId,
-  trackingNumber,
-  carrier,
-  shipDate,
-  packageReferenceId,
-  shippingMethod,
-  orderItems,
-}) {
-  const safeOrderId = assertString(orderId, "orderId");
-  const safeTracking = assertString(
-    trackingNumber,
-    "trackingNumber",
-  );
-
-  if (!Array.isArray(orderItems) || orderItems.length === 0) {
-    throw new Error(
-      "orderItems is required and must include Amazon orderItemId values",
-    );
-  }
-
-  const normalizedItems = orderItems.map((item, index) => {
-    const orderItemId = assertString(
-      item?.orderItemId,
-      `orderItems[${index}].orderItemId`,
-    );
-
-    const quantity = Number(item?.quantity);
-
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      throw new Error(
-        `orderItems[${index}].quantity must be a positive integer`,
-      );
-    }
-
-    return {
-      orderItemId,
-      quantity,
+    const query = {
+      marketplaceIds: getMarketplace(),
+      identifiers: normalizedIdentifier,
+      identifiersType: normalizedType,
+      includedData:
+        "summaries,identifiers,images,productTypes,classifications",
+      pageSize: 20
     };
-  });
 
-  const carrierInfo = normalizeAmazonCarrier(carrier);
+    if (normalizedType === "SKU") query.sellerId = getSellerId();
 
-  const body = {
-    marketplaceId: getMarketplace(),
-    packageDetail: {
-      packageReferenceId: String(
-        packageReferenceId || `pkg-${Date.now()}`,
-      ).slice(0, 100),
-      carrierCode: carrierInfo.carrierCode,
-      carrierName: carrierInfo.carrierName,
-      shippingMethod: String(
-        shippingMethod || "Standard",
-      ).slice(0, 100),
-      trackingNumber: safeTracking,
-      shipDate: new Date(shipDate || Date.now()).toISOString(),
-      orderItems: normalizedItems,
-    },
-  };
+    const result = await spApiCall(
+      "GET",
+      "/catalog/2022-04-01/items",
+      query
+    );
 
-  const response = await spApiCall(
-    "POST",
-    `/orders/v0/orders/${encodeURIComponent(
-      safeOrderId,
-    )}/shipmentConfirmation`,
-    {},
-    body,
-  );
+    if (!result.ok) {
+      return {
+        success: false,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
+      };
+    }
 
-  if (response.ok || response.status === 204) {
+    const items = result.data?.items || [];
+
     return {
       success: true,
-      orderId: safeOrderId,
-      trackingNumber: safeTracking,
-      carrierCode: carrierInfo.carrierCode,
-      itemCount: normalizedItems.length,
-      httpStatus: response.status,
+      identifier: normalizedIdentifier,
+      identifierType: normalizedType,
+      marketplaceId: getMarketplace(),
+      matchCount: items.length,
+      pagination: result.data?.pagination || null,
+      refinements: result.data?.refinements || null,
+      matches: items.map((item) => {
+        const summary =
+          item.summaries?.find(
+            (entry) => entry.marketplaceId === getMarketplace()
+          ) ||
+          item.summaries?.[0] ||
+          {};
+
+        const productType =
+          item.productTypes?.find(
+            (entry) => entry.marketplaceId === getMarketplace()
+          ) ||
+          item.productTypes?.[0] ||
+          {};
+
+        return {
+          asin: item.asin || null,
+          title: summary.itemName || null,
+          brand: summary.brand || null,
+          manufacturer: summary.manufacturer || null,
+          modelNumber: summary.modelNumber || null,
+          color: summary.color || null,
+          size: summary.size || null,
+          productType: productType.productType || null,
+          identifiers: item.identifiers || [],
+          images: item.images || [],
+          classifications: item.classifications || []
+        };
+      })
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+const ALLOWED_IDENTIFIER_TYPES = new Set([
+  "ASIN",
+  "EAN",
+  "GTIN",
+  "ISBN",
+  "JAN",
+  "MINSAN",
+  "SKU",
+  "UPC"
+]);
+
+const ALLOWED_AMAZON_ERROR_TYPES = new Set([
+  "AccessDenied",
+  "Forbidden",
+  "InvalidInput",
+  "InvalidMarketplace",
+  "InvalidMarketplaceId",
+  "QuotaExceeded",
+  "Throttled",
+  "TooManyRequests",
+  "Unauthorized"
+]);
+
+function amazonCatalogErrorType(data) {
+  if (!data || typeof data !== "object") return null;
+
+  const candidates = [
+    data.code,
+    data.error,
+    data.errorCode,
+    data.type,
+    data.errors?.[0]?.code,
+    data.errors?.[0]?.type
+  ];
+
+  for (const candidate of candidates) {
+    const value = String(candidate || "").trim();
+    if (ALLOWED_AMAZON_ERROR_TYPES.has(value)) return value;
+  }
+
+  return null;
+}
+
+function catalogErrorForStatus(status) {
+  if (status === 401) {
+    return {
+      error_code: "AMAZON_AUTH_ERROR",
+      error: "Amazon authentication failed."
+    };
+  }
+
+  if (status === 403) {
+    return {
+      error_code: "AMAZON_CATALOG_PERMISSION_ERROR",
+      error: "Amazon catalog permission denied."
+    };
+  }
+
+  if (status === 429) {
+    return {
+      error_code: "AMAZON_RATE_LIMIT_ERROR",
+      error: "Amazon catalog rate limit exceeded."
     };
   }
 
   return {
-    success: false,
-    orderId: safeOrderId,
-    error_code: "AMAZON_SHIPMENT_CONFIRMATION_FAILED",
-    httpStatus: response.status,
-    error: resultError(response.data),
+    error_code: "AMAZON_CATALOG_ERROR",
+    error: "Amazon catalog search failed."
   };
 }
 
-export async function updateAmazonTracking(
-  orderId,
-  trackingNumber,
-  carrier,
-  orderItems = [],
-) {
-  return confirmAmazonShipment({
-    orderId,
-    trackingNumber,
-    carrier,
-    orderItems,
-  });
-}
+function flattenCatalogIdentifiers(groups = []) {
+  const identifiers = [];
 
-export function getAuthUrl(stateOrRedirectUri, maybeRedirectUri) {
-  const clientId = assertString(
-    process.env.AMAZON_LWA_CLIENT_ID,
-    "AMAZON_LWA_CLIENT_ID",
-  );
-
-  const redirectUri = maybeRedirectUri || stateOrRedirectUri;
-  const state = maybeRedirectUri ? stateOrRedirectUri : null;
-
-  const params = new URLSearchParams({
-    client_id: clientId,
-    scope: "sellingpartnerapi::migration",
-    response_type: "code",
-    redirect_uri: assertString(redirectUri, "redirectUri"),
-  });
-
-  if (state) {
-    params.set("state", String(state));
-  }
-
-  return (
-    "https://sellercentral.amazon.com/apps/external/consent?" +
-    params.toString()
-  );
-}
-
-export async function exchangeAuthCode(code, redirectUri) {
-  if (
-    !process.env.AMAZON_LWA_CLIENT_ID ||
-    !process.env.AMAZON_LWA_CLIENT_SECRET
-  ) {
-    throw new Error("Amazon LWA client credentials are not configured");
-  }
-
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    code: assertString(code, "code"),
-    client_id: process.env.AMAZON_LWA_CLIENT_ID,
-    client_secret: process.env.AMAZON_LWA_CLIENT_SECRET,
-    redirect_uri: assertString(redirectUri, "redirectUri"),
-  });
-
-  const response = await fetch(LWA_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-
-  const data = await readJsonSafely(response);
-
-  if (!response.ok || !data?.refresh_token) {
-    throw new Error("Amazon authorization-code exchange failed.");
-  }
-
-  return {
-    refresh_token: data.refresh_token,
-    access_token: data.access_token || null,
-    expires_in: data.expires_in || null,
-    token_type: data.token_type || null,
-  };
-}
-
-export function normalizeUpc(value) {
-  const normalized = String(value || "").replace(/[\s-]/g, "");
-
-  return /^\d{12}$/.test(normalized) ? normalized : null;
-}
-
-function buildCleanQuery(params) {
-  const clean = {};
-
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === undefined || value === null || value === "") {
-      continue;
-    }
-
-    if (Array.isArray(value)) {
-      const filtered = value.filter(Boolean);
-
-      if (filtered.length > 0) {
-        clean[key] = filtered.join(",");
-      }
-    } else {
-      clean[key] = String(value);
+  for (const group of groups) {
+    for (const entry of group?.identifiers || []) {
+      identifiers.push({
+        type: entry.identifierType || null,
+        value: entry.identifier || null
+      });
     }
   }
 
-  return clean;
+  return identifiers;
 }
 
-export function chooseAmazonImageGroup(
-  imageGroups,
-  marketplaceId = getMarketplace(),
-) {
-  const groups = Array.isArray(imageGroups) ? imageGroups : [];
+function normalizeCatalogItem(item = {}) {
+  const marketplaceId = getMarketplace();
 
-  return (
-    groups.find(
-      (group) => group?.marketplaceId === marketplaceId,
+  const summary =
+    item.summaries?.find(
+      (entry) => entry.marketplaceId === marketplaceId
     ) ||
-    groups[0] ||
-    {}
-  );
-}
+    item.summaries?.[0] ||
+    {};
 
-async function searchCatalogInternal(query) {
-  const response = await spApiCall(
-    "GET",
-    "/catalog/2022-04-01/items",
-    query,
-  );
+  const productType =
+    item.productTypes?.find(
+      (entry) => entry.marketplaceId === marketplaceId
+    ) ||
+    item.productTypes?.[0] ||
+    {};
 
-  if (!response.ok) {
-    return {
-      success: false,
-      status: response.status,
-      error_code: "AMAZON_CATALOG_ERROR",
-      error: "Amazon catalog search failed.",
-      upstream: resultError(response.data),
-    };
-  }
-
-  const items = (response.data?.items || []).map((item) => {
-    const summary = (item.summaries || [])[0] || {};
-    const productType = (item.productTypes || [])[0] || {};
-    const identifiers = [];
-
-    for (const group of item.identifiers || []) {
-      for (const identifier of group.identifiers || []) {
-        identifiers.push({
-          type: identifier.identifierType,
-          value: identifier.identifier,
-        });
-      }
-    }
-
-    const imageGroup = chooseAmazonImageGroup(
-      item.images,
-      getMarketplace(),
-    );
-    const images = Array.isArray(imageGroup.images)
-      ? imageGroup.images
-      : [];
-    const mainImage =
-      images.find((image) => image.variant === "MAIN") ||
-      images[0];
-
-    return {
-      asin: item.asin || null,
-      parent_asin: null,
-      title: summary.itemName || null,
-      brand: summary.brand || null,
-      productType: productType.productType || null,
-      amazon_title: summary.itemName || null,
-      amazon_brand: summary.brand || null,
-      product_type: productType.productType || null,
-      amazon_image: mainImage?.link || mainImage?.url || null,
-      identifiers,
-    };
-  });
+  const parentAsin =
+    item.relationships?.find(
+      (entry) => entry.marketplaceId === marketplaceId
+    )?.relationships?.find(
+      (relationship) => relationship.type === "VARIATION"
+    )?.parentAsins?.[0] ||
+    null;
 
   return {
-    success: true,
-    numberOfResults:
-      response.data?.numberOfResults || items.length,
-    items,
-    upstreamStatus: response.status,
+    asin: item.asin || null,
+    parent_asin: parentAsin,
+    amazon_title: summary.itemName || null,
+    amazon_brand: summary.brand || null,
+    product_type: productType.productType || null,
+    identifiers: flattenCatalogIdentifiers(item.identifiers || [])
   };
-}
-
-export async function searchByIdentifier({
-  identifier,
-  identifiersType,
-  marketplaceId,
-}) {
-  const type = String(identifiersType || "").toUpperCase();
-  let value = String(identifier || "").replace(/[\s-]/g, "");
-
-  if (!value || !type) {
-    return {
-      success: false,
-      error_code: "AMAZON_INVALID_INPUT",
-      error: "Identifier and identifiersType are required.",
-    };
-  }
-
-  if (type === "UPC") {
-    value = normalizeUpc(value);
-
-    if (!value) {
-      return {
-        success: false,
-        error_code: "AMAZON_INVALID_INPUT",
-        error: "UPC must contain exactly 12 digits.",
-      };
-    }
-  }
-
-  if (type === "EAN" && !/^\d{13}$/.test(value)) {
-    return {
-      success: false,
-      error_code: "AMAZON_INVALID_INPUT",
-      error: "EAN must contain exactly 13 digits.",
-    };
-  }
-
-  if (type === "ASIN" && !/^[A-Z0-9]{10}$/i.test(value)) {
-    return {
-      success: false,
-      error_code: "AMAZON_INVALID_INPUT",
-      error: "ASIN must contain exactly 10 alphanumeric characters.",
-    };
-  }
-
-  return searchCatalogInternal(
-    buildCleanQuery({
-      marketplaceIds: marketplaceId || getMarketplace(),
-      identifiers: value,
-      identifiersType: type,
-      includedData:
-        "summaries,identifiers,productTypes,images",
-    }),
-  );
-}
-
-export async function searchByKeywords({
-  keywords,
-  marketplaceId,
-  brandNames,
-}) {
-  const value = String(keywords || "").trim();
-
-  if (!value) {
-    return {
-      success: false,
-      error_code: "AMAZON_INVALID_INPUT",
-      error: "keywords is required.",
-    };
-  }
-
-  return searchCatalogInternal(
-    buildCleanQuery({
-      marketplaceIds: marketplaceId || getMarketplace(),
-      keywords: value,
-      brandNames,
-      includedData:
-        "summaries,identifiers,productTypes,images",
-    }),
-  );
 }
 
 export async function searchCatalogItems(params = {}) {
-  if (params.identifiers && params.identifiersType) {
-    return searchByIdentifier({
-      identifier: Array.isArray(params.identifiers)
-        ? params.identifiers[0]
-        : params.identifiers,
-      identifiersType: params.identifiersType,
-      marketplaceId: getMarketplace(),
-    });
-  }
+  try {
+    checkRuntimeCredentials();
 
-  if (params.keywords) {
-    return searchByKeywords({
-      keywords: params.keywords,
-      marketplaceId: getMarketplace(),
-      brandNames: params.brandNames,
-    });
-  }
+    const identifiers = String(params.identifiers || "")
+      .trim()
+      .replace(/\s+/g, "");
 
-  return {
-    success: false,
-    error_code: "AMAZON_INVALID_INPUT",
-    error: "Missing catalog search parameters.",
-  };
-}
+    const identifiersType = String(params.identifiersType || "")
+      .trim()
+      .toUpperCase();
 
-export async function searchCatalogByIdentifier(
-  identifier,
-  identifiersType = "ASIN",
-) {
-  const result = await searchByIdentifier({
-    identifier,
-    identifiersType,
-    marketplaceId: getMarketplace(),
-  });
+    const keywords = String(params.keywords || "").trim();
+    const brandNames = String(params.brandNames || "").trim();
 
-  return {
-    ...result,
-    matches: Array.isArray(result?.items) ? result.items : [],
-  };
-}
+    const hasIdentifierSearch = Boolean(identifiers || identifiersType);
+    const hasKeywordSearch = Boolean(keywords || brandNames);
 
-export async function getProductTypeDefinition(
-  productType = "PANTS",
-) {
-  const query = {
-    marketplaceIds: getMarketplace(),
-    requirements: "LISTING",
-    locale: "en_US",
-    requirementsEnforced: "ENFORCED",
-  };
-
-  if (getSellerId()) {
-    query.sellerId = getSellerId();
-  }
-
-  const response = await spApiCall(
-    "GET",
-    `/definitions/2020-09-01/productTypes/${encodeURIComponent(
-      productType,
-    )}`,
-    query,
-  );
-
-  return response.ok
-    ? {
-        success: true,
-        productType,
-        definition: response.data,
-      }
-    : {
+    if (hasIdentifierSearch && hasKeywordSearch) {
+      return {
         success: false,
-        status: response.status,
-        error: resultError(response.data),
+        error_code: "INVALID_REQUEST",
+        error:
+          "Use either identifiers with identifiersType, or keywords with optional brandNames.",
+        amazon_http_status: 400,
+        amazon_error_type: "InvalidInput"
       };
+    }
+
+    const query = {
+      marketplaceIds: getMarketplace(),
+      includedData: "summaries,identifiers,productTypes,relationships",
+      pageSize: 20
+    };
+
+    if (hasIdentifierSearch) {
+      if (!identifiers || !identifiersType) {
+        return {
+          success: false,
+          error_code: "INVALID_REQUEST",
+          error: "identifiers and identifiersType are both required.",
+          amazon_http_status: 400,
+          amazon_error_type: "InvalidInput"
+        };
+      }
+
+      if (!ALLOWED_IDENTIFIER_TYPES.has(identifiersType)) {
+        return {
+          success: false,
+          error_code: "INVALID_REQUEST",
+          error: "Unsupported identifier type.",
+          amazon_http_status: 400,
+          amazon_error_type: "InvalidInput"
+        };
+      }
+
+      query.identifiers = identifiers;
+      query.identifiersType = identifiersType;
+
+      if (identifiersType === "SKU") {
+        query.sellerId = getSellerId();
+      }
+    } else {
+      if (!keywords) {
+        return {
+          success: false,
+          error_code: "INVALID_REQUEST",
+          error:
+            "Provide identifiers and identifiersType, or provide keywords.",
+          amazon_http_status: 400,
+          amazon_error_type: "InvalidInput"
+        };
+      }
+
+      query.keywords = keywords;
+
+      if (brandNames) {
+        query.brandNames = brandNames;
+      }
+    }
+
+    const result = await spApiCall(
+      "GET",
+      "/catalog/2022-04-01/items",
+      query
+    );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        ...catalogErrorForStatus(result.status),
+        amazon_http_status: result.status || null,
+        amazon_error_type: amazonCatalogErrorType(result.data)
+      };
+    }
+
+    const items = (result.data?.items || []).map(normalizeCatalogItem);
+
+    return {
+      success: true,
+      numberOfResults:
+        result.data?.numberOfResults ??
+        items.length,
+      items
+    };
+  } catch {
+    return {
+      success: false,
+      error_code: "AMAZON_CATALOG_ERROR",
+      error: "Amazon catalog request failed.",
+      amazon_http_status: null,
+      amazon_error_type: null
+    };
+  }
 }
 
 export async function getListingRestrictions(
   asin,
-  conditionType = "new_new",
+  conditionType = "new_new"
 ) {
-  const normalizedAsin = assertString(asin, "asin")
-    .trim()
-    .toUpperCase();
+  try {
+    checkRuntimeCredentials();
 
-  if (!/^[A-Z0-9]{10}$/.test(normalizedAsin)) {
+    const normalizedAsin = normalizeAsin(asin);
+
+    const result = await spApiCall(
+      "GET",
+      "/listings/2021-08-01/restrictions",
+      {
+        asin: normalizedAsin,
+        sellerId: getSellerId(),
+        marketplaceIds: getMarketplace(),
+        conditionType
+      }
+    );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        asin: normalizedAsin,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
+      };
+    }
+
+    const restrictions = result.data?.restrictions || [];
+
     return {
-      success: false,
-      status: 400,
-      eligible: null,
-      restrictions: [],
-      error_code: "INVALID_ASIN",
-      error: "ASIN must contain exactly 10 letters or numbers.",
-    };
-  }
-
-  const response = await spApiCall(
-    "GET",
-    "/listings/2021-08-01/restrictions",
-    {
+      success: true,
       asin: normalizedAsin,
-      sellerId: assertString(
-        getSellerId(),
-        "AMAZON_SELLER_ID",
-      ),
-      marketplaceIds: getMarketplace(),
-      conditionType: String(conditionType || "new_new"),
-    },
-  );
-
-  if (!response.ok) {
+      conditionType,
+      eligible: restrictions.length === 0,
+      restrictions
+    };
+  } catch (error) {
     return {
       success: false,
-      status: response.status,
-      eligible: null,
-      restrictions: [],
-      error_code: "AMAZON_RESTRICTIONS_REQUEST_FAILED",
-      error: resultError(response.data),
+      error: error.message
     };
   }
-
-  const restrictions = Array.isArray(
-    response.data?.restrictions,
-  )
-    ? response.data.restrictions
-    : [];
-
-  return {
-    success: true,
-    status: response.status,
-    asin: normalizedAsin,
-    conditionType: String(conditionType || "new_new"),
-    eligible: restrictions.length === 0,
-    restrictions,
-  };
 }
 
-export async function previewOfferListing(product = {}) {
-  const asin = product.asin || product.amazon_asin;
+function buildOfferOnlyBody(product = {}) {
+  const marketplaceId = getMarketplace();
+  const asin = normalizeAsin(product.asin || product.amazon_asin);
+  const price = normalizeMoney(product.price || product.sale_price);
+
+  const quantity = normalizeQuantity(
+    product.quantity ??
+      product.inventory_quantity ??
+      product.inventoryQuantity
+  );
+
   const conditionType =
     product.condition_type ||
     product.conditionType ||
     "new_new";
 
-  const restrictions = await getListingRestrictions(
-    asin,
-    conditionType,
-  );
-
   return {
-    ...restrictions,
-    stage: restrictions.success
-      ? restrictions.eligible
-        ? "ELIGIBLE"
-        : "RESTRICTED"
-      : "RESTRICTION_CHECK_ERROR",
-    readOnly: true,
-    externalWritesPerformed: 0,
-    preview: {
-      asin: asin ? String(asin).trim().toUpperCase() : null,
-      sku: product.sku || product.amazon_sku || null,
-      price: product.price ?? null,
-      quantity: product.quantity ?? null,
-      conditionType,
-    },
-  };
-}
-
-async function putOfferOnlyListing(product) {
-  const sellerId = assertString(
-    getSellerId(),
-    "AMAZON_SELLER_ID",
-  );
-  const sku =
-    product.amazon_sku ||
-    product.sku ||
-    `OV-${product.id || Date.now()}`;
-  const asin = assertString(
-    product.asin || product.amazon_asin,
-    "asin",
-  );
-
-  const path =
-    `/listings/2021-08-01/items/${encodeURIComponent(
-      sellerId,
-    )}/` + encodeURIComponent(sku);
-
-  const body = {
-    productType: product.productType || "PRODUCT",
+    // Amazon documents PRODUCT for offer-only listing submissions.
+    productType: "PRODUCT",
     requirements: "LISTING_OFFER_ONLY",
     attributes: {
+      condition_type: [
+        {
+          value: conditionType,
+          marketplace_id: marketplaceId
+        }
+      ],
       merchant_suggested_asin: [
         {
           value: asin,
-          marketplace_id: getMarketplace(),
-        },
-      ],
-      purchasable_offer: [
-        {
-          marketplace_id: getMarketplace(),
-          currency: "USD",
-          our_price: [
-            {
-              amount: String(product.price || 0),
-              currency_code: "USD",
-            },
-          ],
-        },
+          marketplace_id: marketplaceId
+        }
       ],
       fulfillment_availability: [
         {
           fulfillment_channel_code: "DEFAULT",
-          quantity: Number(product.quantity) || 0,
-        },
+          quantity
+        }
       ],
-      condition_type: [
+      purchasable_offer: [
         {
-          value: product.condition_type || "new_new",
-          marketplace_id: getMarketplace(),
-        },
-      ],
-    },
-  };
-
-  const response = await spApiCall(
-    "PUT",
-    path,
-    { marketplaceIds: getMarketplace() },
-    body,
-  );
-
-  return {
-    response,
-    sku,
-    asin,
+          audience: "ALL",
+          currency: "USD",
+          our_price: [
+            {
+              schedule: [
+                {
+                  value_with_tax: price
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
   };
 }
 
-export async function createOfferListing(product) {
-  try {
-    const { response, sku, asin } =
-      await putOfferOnlyListing(product);
+async function submitOfferOnlyListing(product, validationPreview) {
+  checkRuntimeCredentials();
 
-    const data = response.data || {};
-    const issues = Array.isArray(data.issues)
-      ? data.issues
-      : [];
-    const success = response.ok && issues.length === 0;
+  const sellerId = getSellerId();
+  const sku = getProductSku(product);
+  const asin = normalizeAsin(product.asin || product.amazon_asin);
 
+  const path =
+    `/listings/2021-08-01/items/` +
+    `${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
+
+  const query = {
+    marketplaceIds: getMarketplace(),
+    issueLocale: "en_US"
+  };
+
+  if (validationPreview)
+     query.mode = "VALIDATION_PREVIEW";
+
+  const body = buildOfferOnlyBody({
+    ...product,
+    asin
+  });
+
+  const result = await spApiCall("PUT", path, query, body);
+
+  if (!result.ok) {
     return {
-      success,
-      status: response.status,
+      success: false,
+      preview: validationPreview,
       sku,
       asin,
-      stage: success ? "SUBMITTED" : "SUBMISSION_FAILED",
-      amazonStatus: data.status || null,
-      issues,
-      submissionId: data.submissionId || null,
-      error: success ? null : resultError(data),
+      status: result.status,
+      error: amazonError(result),
+      data: result.data,
+      requestBody: body
     };
+  }
+
+  const issues = result.data?.issues || [];
+  const blockingIssues = issues.filter(
+    (issue) => issue.severity === "ERROR"
+  );
+
+  return {
+    success: blockingIssues.length === 0,
+    preview: validationPreview,
+    sku,
+    asin,
+    amazonStatus: result.data?.status || null,
+    submissionId: result.data?.submissionId || null,
+    issues,
+    blockingIssueCount: blockingIssues.length,
+    identifiers: result.data?.identifiers || [],
+    data: result.data
+  };
+}
+
+export async function previewOfferListing(product) {
+  try {
+    if (!product) {
+      return {
+        success: false,
+        error: "Product is required"
+      };
+    }
+
+    return await submitOfferOnlyListing(product, true);
   } catch (error) {
     return {
       success: false,
-      stage: "INVALID",
-      status: 400,
-      error: error instanceof Error ? error.message : String(error),
+      preview: true,
+      error: error.message
     };
   }
 }
 
-export async function createOffer(product) {
-  return createOfferListing(product);
+export async function createOfferListing(product) {
+  try {
+    if (!product) {
+      return {
+        success: false,
+        error: "Product is required"
+      };
+    }
+
+    const asin = normalizeAsin(product.asin || product.amazon_asin);
+
+    const restrictions = await getListingRestrictions(
+      asin,
+      product.condition_type ||
+        product.conditionType ||
+        "new_new"
+    );
+
+    if (!restrictions.success) {
+      return {
+        success: false,
+        stage: "RESTRICTIONS_CHECK",
+        restrictions
+      };
+    }
+
+    if (!restrictions.eligible) {
+      return {
+        success: false,
+        stage: "RESTRICTED",
+        asin,
+        message:
+          "Amazon requires approval or additional action before this ASIN can be listed.",
+        restrictions: restrictions.restrictions
+      };
+    }
+
+    const preview = await previewOfferListing(product);
+
+    if (!preview.success) {
+      return {
+        success: false,
+        stage: "VALIDATION_PREVIEW",
+        asin,
+        preview
+      };
+    }
+
+    const submission = await submitOfferOnlyListing(product, false);
+
+    return {
+      ...submission,
+      stage: submission.success ? "SUBMITTED" : "SUBMISSION_FAILED",
+      restrictions,
+      preview
+    };
+  } catch (error) {
+    return {
+      success: false,
+      stage: "ERROR",
+      error: error.message
+    };
+  }
+}
+
+function mapProductType(product = {}) {
+  const combined = [
+    product.category,
+    product.product_type,
+    product.productType,
+    product.product_name,
+    product.productTitle,
+    product.title
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (
+    combined.includes("jean") ||
+    combined.includes("pants") ||
+    combined.includes("trouser")
+  ) {
+    return "PANTS";
+  }
+
+  if (combined.includes("dress")) return "DRESS";
+
+  if (
+    combined.includes("shirt") ||
+    combined.includes("top") ||
+    combined.includes("blouse")
+  ) {
+    return "SHIRT";
+  }
+
+  if (
+    combined.includes("shoe") ||
+    combined.includes("boot") ||
+    combined.includes("sneaker")
+  ) {
+    return "SHOES";
+  }
+
+  if (
+    combined.includes("jacket") ||
+    combined.includes("coat")
+  ) {
+    return "OUTERWEAR";
+  }
+
+  return product.amazon_product_type || "PRODUCT";
+}
+
+function normalizeImages(product = {}) {
+  if (Array.isArray(product.product_images)) {
+    return product.product_images.filter(Boolean);
+  }
+
+  if (Array.isArray(product.images)) {
+    return product.images.filter(Boolean);
+  }
+
+  if (product.image) return [product.image];
+  return [];
+}
+
+
+function isBlankAmazonAttribute(value) {
+  return (
+    value === undefined ||
+    value === null ||
+    value === "" ||
+    (Array.isArray(value) && value.length === 0)
+  );
+}
+
+function inferExternalIdentifierType(value) {
+  const normalized = String(value || "").replace(/\D/g, "");
+
+  if (normalized.length === 12) return "upc";
+  if (normalized.length === 13) return "ean";
+  if (normalized.length === 14) return "gtin";
+
+  return "upc";
+}
+
+function normalizeCustomAmazonAttributes(customAttributes, marketplaceId) {
+  if (!customAttributes || typeof customAttributes !== "object") {
+    return {};
+  }
+
+  const textAttributes = new Set([
+    "product_description",
+    "fabric_type",
+    "care_instructions",
+    "color",
+    "age_range_description",
+    "department",
+    "model_name",
+    "style"
+  ]);
+
+  const controlledAttributes = new Set([
+    "merchant_suggested_asin",
+    "rise",
+    "closure",
+    "target_gender",
+    "import_designation",
+    "country_of_origin"
+  ]);
+
+  const normalized = {};
+
+  for (const [name, rawValue] of Object.entries(customAttributes)) {
+    if (isBlankAmazonAttribute(rawValue)) continue;
+
+    // Preserve already-structured SP-API attribute arrays.
+    if (
+      Array.isArray(rawValue) &&
+      rawValue.length > 0 &&
+      rawValue.every(
+        (entry) =>
+          entry &&
+          typeof entry === "object" &&
+          !Array.isArray(entry)
+      )
+    ) {
+      normalized[name] = rawValue;
+      continue;
+    }
+
+    if (name === "bullet_point") {
+      const bulletValues = Array.isArray(rawValue)
+        ? rawValue
+        : String(rawValue)
+            .split(/\r?\n/)
+            .map((value) => value.trim())
+            .filter(Boolean);
+
+      normalized.bullet_point = bulletValues.map((value) => ({
+        value: String(value),
+        marketplace_id: marketplaceId,
+        language_tag: "en_US"
+      }));
+      continue;
+    }
+
+    if (name === "list_price") {
+      const amount =
+        typeof rawValue === "object"
+          ? Number(
+              rawValue.amount ??
+                rawValue.value_with_tax ??
+                rawValue.value
+            )
+          : Number(rawValue);
+
+      if (Number.isFinite(amount) && amount > 0) {
+        normalized.list_price = [
+          {
+            currency:
+              (typeof rawValue === "object" && rawValue.currency) ||
+              "USD",
+            value_with_tax: Number(amount.toFixed(2)),
+            marketplace_id: marketplaceId
+          }
+        ];
+      }
+      continue;
+    }
+
+    if (name === "externally_assigned_product_identifier") {
+      const identifierValue =
+        typeof rawValue === "object"
+          ? rawValue.value ?? rawValue.identifier
+          : rawValue;
+
+      if (!isBlankAmazonAttribute(identifierValue)) {
+        normalized.externally_assigned_product_identifier = [
+          {
+            type:
+              (typeof rawValue === "object" &&
+                (rawValue.type || rawValue.identifierType)) ||
+              inferExternalIdentifierType(identifierValue),
+            value: String(identifierValue).trim(),
+            marketplace_id: marketplaceId
+          }
+        ];
+      }
+      continue;
+    }
+
+    if (name === "bottoms_size") {
+      if (typeof rawValue === "object" && !Array.isArray(rawValue)) {
+        normalized.bottoms_size = [
+          {
+            ...rawValue,
+            marketplace_id:
+              rawValue.marketplace_id || marketplaceId
+          }
+        ];
+      } else {
+        normalized.bottoms_size = [
+          {
+            size: String(rawValue).trim(),
+            size_system: "US",
+            size_class: "numeric",
+            marketplace_id: marketplaceId
+          }
+        ];
+      }
+      continue;
+    }
+
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+
+    if (textAttributes.has(name)) {
+      normalized[name] = values
+        .filter((value) => !isBlankAmazonAttribute(value))
+        .map((value) => ({
+          value: String(value),
+          marketplace_id: marketplaceId,
+          language_tag: "en_US"
+        }));
+      continue;
+    }
+
+    if (controlledAttributes.has(name)) {
+      normalized[name] = values
+        .filter((value) => !isBlankAmazonAttribute(value))
+        .map((value) => ({
+          value: String(value),
+          marketplace_id: marketplaceId
+        }));
+      continue;
+    }
+
+    // Generic fallback for any additional attributes added later.
+    normalized[name] = values
+      .filter((value) => !isBlankAmazonAttribute(value))
+      .map((value) => ({
+        value:
+          typeof value === "object"
+            ? value.value ?? value
+            : value,
+        marketplace_id: marketplaceId
+      }));
+  }
+
+  return normalized;
+}
+
+function buildListingBody(product = {}) {
+  const marketplaceId = getMarketplace();
+
+  const title = String(
+    product.product_name ||
+      product.productTitle ||
+      product.title ||
+      "The Outfit Vault Product"
+  ).slice(0, 200);
+
+  const price = normalizeMoney(product.sale_price || product.price);
+
+  const quantity = normalizeQuantity(
+    product.inventory_quantity ??
+      product.inventoryQuantity
+  );
+
+  const images = normalizeImages(product);
+
+  const attributes = {
+    item_name: [
+      {
+        value: title,
+        marketplace_id: marketplaceId,
+        language_tag: "en_US"
+      }
+    ],
+    brand: [
+      {
+        value:
+          product.brand ||
+          product.vendor ||
+          "The Outfit Vault",
+        marketplace_id: marketplaceId
+      }
+    ],
+    condition_type: [
+      {
+        value: "new_new",
+        marketplace_id: marketplaceId
+      }
+    ],
+    fulfillment_availability: [
+      {
+        fulfillment_channel_code: "DEFAULT",
+        quantity
+      }
+    ],
+    purchasable_offer: [
+      {
+        audience: "ALL",
+        currency: "USD",
+        marketplace_id: marketplaceId,
+        our_price: [
+          {
+            schedule: [
+              {
+                value_with_tax: price
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+
+  if (images[0]) {
+    attributes.main_product_image_locator = [
+      {
+        marketplace_id: marketplaceId,
+        media_location: images[0]
+      }
+    ];
+  }
+
+  const customAttributes = normalizeCustomAmazonAttributes(
+    product.attributes,
+    marketplaceId
+  );
+
+  Object.assign(attributes, customAttributes);
+
+  return {
+    productType: mapProductType(product),
+    requirements: "LISTING",
+    attributes
+  };
+}
+
+export async function publishListing(product) {
+  try {
+    checkRuntimeCredentials();
+
+    if (!product) {
+      return {
+        success: false,
+        error: "Product is required"
+      };
+    }
+
+    const sellerId = getSellerId();
+    const sku = getProductSku(product);
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
+
+    const body = buildListingBody(product);
+
+    const result = await spApiCall(
+      "PUT",
+      path,
+      {
+        marketplaceIds: getMarketplace(),
+        includedData: "issues",
+        issueLocale: "en_US"
+      },
+      body
+    );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        sku,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
+      };
+    }
+
+    return {
+      success: true,
+      sku,
+      status: result.data?.status || "SUBMITTED",
+      issues: result.data?.issues || [],
+      data: result.data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+async function getExistingProductType(sku) {
+  const sellerId = getSellerId();
+
+  const path =
+    `/listings/2021-08-01/items/` +
+    `${encodeURIComponent(sellerId)}/${encodeURIComponent(sku)}`;
+
+  const result = await spApiCall("GET", path, {
+    marketplaceIds: getMarketplace(),
+    includedData: "summaries"
+  });
+
+  if (!result.ok) return "PRODUCT";
+
+  return (
+    result.data?.summaries?.[0]?.productType ||
+    result.data?.productType ||
+    "PRODUCT"
+  );
+}
+
+export async function getListingStatus(sku) {
+  try {
+    checkRuntimeCredentials();
+
+    const normalizedSku = normalizeSku(sku);
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(getSellerId())}/${encodeURIComponent(
+        normalizedSku
+      )}`;
+
+    const result = await spApiCall("GET", path, {
+      marketplaceIds: getMarketplace(),
+      includedData:
+        "summaries,issues,attributes,offers,fulfillmentAvailability"
+    });
+
+    if (!result.ok) {
+      return {
+        success: false,
+        sku: normalizedSku,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
+      };
+    }
+
+    return {
+      success: true,
+      sku: normalizedSku,
+      data: result.data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sku,
+      error: error.message
+    };
+  }
+}
+
+export async function syncInventory(sku, quantity) {
+  try {
+    checkRuntimeCredentials();
+
+    const normalizedSku = normalizeSku(sku);
+    const productType = await getExistingProductType(normalizedSku);
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(getSellerId())}/${encodeURIComponent(
+        normalizedSku
+      )}`;
+
+    const body = {
+      productType,
+      patches: [
+        {
+          op: "replace",
+          path: "/attributes/fulfillment_availability",
+          value: [
+            {
+              fulfillment_channel_code: "DEFAULT",
+              quantity: normalizeQuantity(quantity)
+            }
+          ]
+        }
+      ]
+    };
+
+    const result = await spApiCall(
+      "PATCH",
+      path,
+      {
+        marketplaceIds: getMarketplace(),
+        includedData: "issues",
+        issueLocale: "en_US"
+      },
+      body
+    );
+
+    return {
+      success: result.ok,
+      sku: normalizedSku,
+      quantity: normalizeQuantity(quantity),
+      status: result.status,
+      error: result.ok ? null : amazonError(result),
+      data: result.data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sku,
+      error: error.message
+    };
+  }
+}
+
+export async function syncPrice(sku, price) {
+  try {
+    checkRuntimeCredentials();
+
+    const normalizedSku = normalizeSku(sku);
+    const normalizedPrice = normalizeMoney(price);
+    const productType = await getExistingProductType(normalizedSku);
+
+    const path =
+      `/listings/2021-08-01/items/` +
+      `${encodeURIComponent(getSellerId())}/${encodeURIComponent(
+        normalizedSku
+      )}`;
+
+    const body = {
+      productType,
+      patches: [
+        {
+          op: "replace",
+          path: "/attributes/purchasable_offer",
+          value: [
+            {
+              audience: "ALL",
+              currency: "USD",
+              our_price: [
+                {
+                  schedule: [
+                    {
+                      value_with_tax: normalizedPrice
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+
+    const result = await spApiCall(
+      "PATCH",
+      path,
+      {
+        marketplaceIds: getMarketplace(),
+        includedData: "issues",
+        issueLocale: "en_US"
+      },
+      body
+    );
+
+    return {
+      success: result.ok,
+      sku: normalizedSku,
+      price: normalizedPrice,
+      status: result.status,
+      error: result.ok ? null : amazonError(result),
+      data: result.data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sku,
+      error: error.message
+    };
+  }
+}
+
+export async function getOrders(createdAfter) {
+  try {
+    checkRuntimeCredentials();
+
+    const result = await spApiCall(
+      "GET",
+      "/orders/v0/orders",
+      {
+        MarketplaceIds: getMarketplace(),
+        CreatedAfter:
+          createdAfter ||
+          new Date(
+            Date.now() -
+              7 * 24 * 60 * 60 * 1000
+          ).toISOString()
+      }
+    );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
+      };
+    }
+
+    return {
+      success: true,
+      orders: result.data?.payload?.Orders || [],
+      nextToken: result.data?.payload?.NextToken || null
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+export async function getOrderItems(orderId) {
+  try {
+    checkRuntimeCredentials();
+
+    if (!orderId) {
+      return {
+        success: false,
+        error: "Amazon order ID is required"
+      };
+    }
+
+    const result = await spApiCall(
+      "GET",
+      `/orders/v0/orders/${encodeURIComponent(orderId)}/orderItems`
+    );
+
+    if (!result.ok) {
+      return {
+        success: false,
+        orderId,
+        status: result.status,
+        error: amazonError(result),
+        data: result.data
+      };
+    }
+
+    return {
+      success: true,
+      orderId,
+      orderItems: result.data?.payload?.OrderItems || [],
+      nextToken: result.data?.payload?.NextToken || null
+    };
+  } catch (error) {
+    return {
+      success: false,
+      orderId,
+      error: error.message
+    };
+  }
+}
+
+export async function updateAmazonTracking(
+  orderId,
+  trackingNumber,
+  carrier
+) {
+  try {
+    checkRuntimeCredentials();
+
+    if (!orderId || !trackingNumber) {
+      return {
+        success: false,
+        error: "orderId and trackingNumber are required"
+      };
+    }
+
+    const orderItemsResult = await getOrderItems(orderId);
+
+    if (!orderItemsResult.success) return orderItemsResult;
+
+    const orderItems = orderItemsResult.orderItems.map((item) => ({
+      orderItemId: item.OrderItemId,
+      quantity: Number(item.QuantityOrdered) || 1
+    }));
+
+    const result = await spApiCall(
+      "POST",
+      `/orders/v0/orders/${encodeURIComponent(
+        orderId
+      )}/shipmentConfirmation`,
+      {},
+      {
+        packageDetail: {
+          packageReferenceId: "1",
+          carrierCode: carrier || "UPS",
+          shippingMethod: carrier || "Standard",
+          trackingNumber,
+          shipDate: new Date().toISOString(),
+          orderItems
+        },
+        marketplaceId: getMarketplace()
+      }
+    );
+
+    return {
+      success: result.ok,
+      orderId,
+      trackingNumber,
+      status: result.status,
+      error: result.ok ? null : amazonError(result),
+      data: result.data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      orderId,
+      error: error.message
+    };
+  }
+}
+
+export function getAuthUrl(state, _redirectUri) {
+  const applicationId = process.env.AMAZON_SPAPI_APP_ID;
+
+  if (!applicationId) {
+    throw new Error("Missing AMAZON_SPAPI_APP_ID");
+  }
+
+  const sellerCentralUrl =
+    process.env.AMAZON_SELLER_CENTRAL_URL ||
+    "https://sellercentral.amazon.com";
+
+  const params = new URLSearchParams({
+    application_id: applicationId,
+    state: state || Math.random().toString(36).slice(2)
+  });
+
+  const appVersion = String(
+    process.env.AMAZON_SPAPI_APP_VERSION || "beta"
+  ).toLowerCase();
+
+  if (appVersion === "beta") {
+    params.set("version", "beta");
+  }
+
+  return (
+    `${sellerCentralUrl}` +
+    "/apps/authorize/consent?" +
+    params.toString()
+  );
+}
+
+export async function exchangeAuthCode(code, redirectUri) {
+  checkLwaCredentials();
+
+  if (!code) {
+    throw new Error("Missing Amazon authorization code");
+  }
+
+  if (!redirectUri) {
+    throw new Error("Missing Amazon OAuth redirect URI");
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+    client_id: process.env.AMAZON_LWA_CLIENT_ID,
+    client_secret: process.env.AMAZON_LWA_CLIENT_SECRET
+  });
+
+  const response = await fetch(LWA_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      Accept: "application/json"
+    },
+    body: body.toString()
+  });
+
+  const responseText = await response.text();
+  let data;
+
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `Amazon token exchange returned invalid JSON: ${responseText}`
+    );
+  }
+
+  if (!response.ok || !data.refresh_token) {
+    throw new Error(
+      `Amazon token exchange failed (${response.status}): ${JSON.stringify(
+        data
+      )}`
+    );
+  }
+
+  return data;
 }
