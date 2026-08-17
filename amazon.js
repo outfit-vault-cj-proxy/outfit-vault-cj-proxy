@@ -1284,6 +1284,113 @@ async function getExistingProductType(sku) {
   );
 }
 
+/**
+ * Read-only bulk listing retrieval for the authenticated Amazon seller.
+ *
+ * Uses SP-API Listings Items searchListingsItems and follows pageToken until
+ * the complete seller listing universe has been collected. No Amazon writes
+ * are performed by this function.
+ */
+export async function getAllAmazonListings(options = {}) {
+  try {
+    checkRuntimeCredentials();
+
+    const sellerId = getSellerId();
+    const marketplaceId = getMarketplace();
+    const requestedPageSize = Number(options.pageSize);
+    const pageSize = Number.isFinite(requestedPageSize)
+      ? Math.min(20, Math.max(1, Math.floor(requestedPageSize)))
+      : 20;
+
+    const includedData =
+      options.includedData ||
+      "summaries,issues,offers,fulfillmentAvailability,productTypes,relationships";
+
+    const items = [];
+    let pageToken = null;
+    let pagesFetched = 0;
+
+    do {
+      const query = {
+        marketplaceIds: marketplaceId,
+        includedData,
+        issueLocale: options.issueLocale || "en_US",
+        pageSize,
+        sortBy: options.sortBy || "sku",
+        sortOrder: options.sortOrder || "ASC"
+      };
+
+      if (pageToken) query.pageToken = pageToken;
+
+      const result = await spApiCall(
+        "GET",
+        `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
+        query
+      );
+
+      if (!result.ok) {
+        return {
+          success: false,
+          readOnly: true,
+          externalWritesPerformed: 0,
+          status: result.status,
+          error: amazonError(result),
+          data: result.data,
+          seller_id: sellerId,
+          marketplace_id: marketplaceId,
+          pages_fetched: pagesFetched,
+          records_fetched: items.length
+        };
+      }
+
+      const pageItems = Array.isArray(result.data?.items)
+        ? result.data.items
+        : [];
+
+      items.push(...pageItems);
+      pagesFetched += 1;
+
+      pageToken =
+        result.data?.pagination?.nextToken ||
+        result.data?.pagination?.next_token ||
+        result.data?.nextToken ||
+        null;
+
+      // Defensive loop guard: Amazon page tokens should advance on each page.
+      if (pagesFetched > 10000) {
+        return {
+          success: false,
+          readOnly: true,
+          externalWritesPerformed: 0,
+          error: "Amazon listings pagination exceeded safety limit",
+          seller_id: sellerId,
+          marketplace_id: marketplaceId,
+          pages_fetched: pagesFetched,
+          records_fetched: items.length
+        };
+      }
+    } while (pageToken);
+
+    return {
+      success: true,
+      readOnly: true,
+      externalWritesPerformed: 0,
+      seller_id: sellerId,
+      marketplace_id: marketplaceId,
+      pages_fetched: pagesFetched,
+      records_fetched: items.length,
+      items
+    };
+  } catch (error) {
+    return {
+      success: false,
+      readOnly: true,
+      externalWritesPerformed: 0,
+      error: error.message
+    };
+  }
+}
+
 export async function getListingStatus(sku) {
   try {
     checkRuntimeCredentials();
