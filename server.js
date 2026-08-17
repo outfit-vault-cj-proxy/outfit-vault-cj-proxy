@@ -16,6 +16,7 @@ import {
   syncInventory,
   syncPrice,
   getListingStatus,
+  getAllAmazonListings,
   getOrders,
   getOrderItems,
   updateAmazonTracking,
@@ -539,7 +540,9 @@ app.get("/health", async (req, res) => {
       amazonCreate:
         "/amazon/offer/create",
       amazonPublishPage:
-        "/amazon/publish-page"
+        "/amazon/publish-page",
+      amazonListingsAll:
+        "/amazon/listings/all"
     }
   });
 });
@@ -981,6 +984,65 @@ app.get(
         .json(data);
     } catch (error) {
       jsonError(res, 500, error);
+    }
+  }
+);
+
+app.get(
+  "/amazon/listings/all",
+  async (req, res) => {
+    try {
+      const expectedAdminKey = String(
+        process.env.AMAZON_AUTH_SECRET || ""
+      ).trim();
+
+      const providedAdminKey = String(
+        req.headers["x-admin-key"] || ""
+      ).trim();
+
+      if (
+        expectedAdminKey &&
+        providedAdminKey !== expectedAdminKey
+      ) {
+        return res.status(401).json({
+          success: false,
+          readOnly: true,
+          externalWritesPerformed: 0,
+          error: "Unauthorized"
+        });
+      }
+
+      const result = await getAllAmazonListings({
+        pageSize: req.query.pageSize,
+        includedData: req.query.includedData,
+        issueLocale: req.query.issueLocale,
+        sortBy: req.query.sortBy,
+        sortOrder: req.query.sortOrder
+      });
+
+      return res
+        .status(
+          result?.success
+            ? 200
+            : Number.isInteger(result?.status)
+              ? result.status
+              : 502
+        )
+        .json({
+          ...result,
+          endpoint: "/amazon/listings/all"
+        });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        readOnly: true,
+        externalWritesPerformed: 0,
+        endpoint: "/amazon/listings/all",
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error)
+      });
     }
   }
 );
@@ -2017,7 +2079,9 @@ app.use((req, res) => {
       offerPreview:
         "/amazon/offer/preview?asin=B077SH7LZH&sku=AI7AR&price=86.95&quantity=1",
       listingItem:
-        "/amazon/listings/item/:sku"
+        "/amazon/listings/item/:sku",
+      listingsAll:
+        "/amazon/listings/all"
     }
   });
 });
